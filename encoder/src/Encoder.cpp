@@ -762,43 +762,69 @@ void Encoder::encode_residuals(unsigned plane, unsigned loq, const Surface &resi
 		}
 	}
 
-	//// Quantize each layer
+	//// Quantize each layer - each layer is independent, process them in parallel
 	//
-	for (unsigned layer = 0; layer < num_residual_layers(); ++layer) {
-
-		Surface syms;
-		if (passes == 1) {
+	{
+		std::vector<std::thread> threads;
+		const unsigned n_layers = num_residual_layers();
+		// The planes run in parallel already; give the luma plane most of the cores (it has 4x
+		// the chroma area) and run the chroma planes inline to avoid oversubscribing
+		const unsigned cores = std::max(1u, std::thread::hardware_concurrency());
+		const unsigned n_threads = (plane == 0) ? std::min(n_layers, std::max(1u, cores - 2)) : 1;
+		std::vector<std::exception_ptr> errors(n_threads);
+		auto quantize_range = [&](unsigned begin, unsigned end, unsigned tid) {
+			try {
+				for (unsigned layer = begin; layer < end; ++layer) {
+					Surface syms;
+					if (passes == 1) {
 #if defined PRIORITY_COEF
-			syms = Quantize().process(priority_coefficients[layer], dirq_step_width[layer][0], dirq_deadzone[layer][0], pixel_sad,
-			                          transform_block_size(), encoder_configuration_.quant_reduced_deadzone);
+						syms = Quantize().process(priority_coefficients[layer], dirq_step_width[layer][0], dirq_deadzone[layer][0],
+						                          pixel_sad, transform_block_size(),
+						                          encoder_configuration_.quant_reduced_deadzone);
 #else  // defined PRIORITY_COEF
-			syms = Quantize().process(coefficients_sad[layer], dirq_step_width[layer][0], dirq_deadzone[layer][0], pixel_sad,
-			                          transform_block_size(), encoder_configuration_.quant_reduced_deadzone);
+						syms = Quantize().process(coefficients_sad[layer], dirq_step_width[layer][0], dirq_deadzone[layer][0],
+						                          pixel_sad, transform_block_size(),
+						                          encoder_configuration_.quant_reduced_deadzone);
 #endif // defined PRIORITY_COEF
-		} else {
+					} else {
 #if defined PRIORITY_COEF
-			syms = Quantize_SWM().process(priority_coefficients[layer], transform_block_size(), dirq_step_width[layer],
-			                              dirq_deadzone[layer], temporal_mask, pixel_sad,
-			                              encoder_configuration_.quant_reduced_deadzone);
+						syms = Quantize_SWM().process(priority_coefficients[layer], transform_block_size(), dirq_step_width[layer],
+						                              dirq_deadzone[layer], temporal_mask, pixel_sad,
+						                              encoder_configuration_.quant_reduced_deadzone);
 #else  // defined PRIORITY_COEF
-			syms = Quantize_SWM().process(coefficients_sad[layer], transform_block_size(), dirq_step_width[layer],
-			                              dirq_deadzone[layer], temporal_mask, pixel_sad,
-			                              encoder_configuration_.quant_reduced_deadzone);
+						syms = Quantize_SWM().process(coefficients_sad[layer], transform_block_size(), dirq_step_width[layer],
+						                              dirq_deadzone[layer], temporal_mask, pixel_sad,
+						                              encoder_configuration_.quant_reduced_deadzone);
 #endif // defined PRIORITY_COEF
-		}
-		if (is_user_data_layer(loq, layer)) {
-			//// Insert User Data
+					}
+					if (is_user_data_layer(loq, layer)) {
+						//// Insert User Data
 #if USER_DATA_EXTRACTION
-			FILE *file = fopen("userdata_enc.bin", "ab");
-			symbols[layer] = UserDataInsert().process(syms, encoder_configuration_.user_data_method,
-			                                          configuration_.global_configuration.user_data_enabled, file);
-			fclose(file);
+						FILE *file = fopen("userdata_enc.bin", "ab");
+						symbols[layer] = UserDataInsert().process(syms, encoder_configuration_.user_data_method,
+						                                          configuration_.global_configuration.user_data_enabled, file);
+						fclose(file);
 #else
-			symbols[layer] = UserDataInsert().process(syms, encoder_configuration_.user_data_method,
-			                                          configuration_.global_configuration.user_data_enabled);
+						symbols[layer] = UserDataInsert().process(syms, encoder_configuration_.user_data_method,
+						                                          configuration_.global_configuration.user_data_enabled);
 #endif
-		} else
-			symbols[layer] = syms;
+					} else
+						symbols[layer] = syms;
+				}
+			} catch (...) {
+				errors[tid] = std::current_exception();
+			}
+		};
+		for (unsigned t = 0; t < n_threads; ++t) {
+			const unsigned begin = (n_layers * t) / n_threads;
+			const unsigned end = (n_layers * (t + 1)) / n_threads;
+			threads.emplace_back(quantize_range, begin, end, t);
+		}
+		for (auto &t : threads)
+			t.join();
+		for (auto &e : errors)
+			if (e)
+				std::rethrow_exception(e);
 	}
 	if (final && loq == LOQ_LEVEL_1)
 		Surface::dump_layers(symbols, format("enc_base_coeff_quant_output_P%1d", plane), transform_block_size());
@@ -929,26 +955,53 @@ Surface Encoder::decode_residuals(unsigned plane, unsigned loq, const Surface sy
 		}
 	}
 
-	// Dequantize
-	for (unsigned layer = 0; layer < num_residual_layers(); ++layer) {
-		Surface syms;
-		if (is_user_data_layer(loq, layer))
-			syms = UserDataClear().process(symbols[layer], configuration_.global_configuration.user_data_enabled);
-		else
-			syms = symbols[layer];
+	// Dequantize - each layer is independent, process them in parallel
+	{
+		std::vector<std::thread> threads;
+		const unsigned n_layers = num_residual_layers();
+		const unsigned cores = std::max(1u, std::thread::hardware_concurrency());
+		const unsigned n_threads = (plane == 0) ? std::min(n_layers, std::max(1u, cores - 2)) : 1;
+		std::vector<std::exception_ptr> errors(n_threads);
+		auto dequantize_range = [&](unsigned begin, unsigned end, unsigned tid) {
+			try {
+				for (unsigned layer = begin; layer < end; ++layer) {
+					Surface syms;
+					if (is_user_data_layer(loq, layer))
+						syms = UserDataClear().process(symbols[layer], configuration_.global_configuration.user_data_enabled);
+					else
+						syms = symbols[layer];
 
-		if (passes == 1) {
-			coefficients[layer] = InverseQuantize().process(
-			    syms, invq_step_width[layer][0],
-			    find_invq_applied_offset(configuration_.picture_configuration, invq_offset[layer][0], invq_deadzone[layer][0]));
-		} else {
-			int32_t invq_applied_offset[2] = {
-			    find_invq_applied_offset(configuration_.picture_configuration, invq_offset[layer][0], invq_deadzone[layer][0]),
-			    find_invq_applied_offset(configuration_.picture_configuration, invq_offset[layer][1], invq_deadzone[layer][1])};
+					if (passes == 1) {
+						coefficients[layer] = InverseQuantize().process(
+						    syms, invq_step_width[layer][0],
+						    find_invq_applied_offset(configuration_.picture_configuration, invq_offset[layer][0],
+						                             invq_deadzone[layer][0]));
+					} else {
+						int32_t invq_applied_offset[2] = {
+						    find_invq_applied_offset(configuration_.picture_configuration, invq_offset[layer][0],
+						                             invq_deadzone[layer][0]),
+						    find_invq_applied_offset(configuration_.picture_configuration, invq_offset[layer][1],
+						                             invq_deadzone[layer][1])};
 
-			coefficients[layer] = InverseQuantize_SWM().process(symbols[layer], transform_block_size(), invq_step_width[layer],
-			                                                    invq_applied_offset, temporal_mask);
+						coefficients[layer] = InverseQuantize_SWM().process(symbols[layer], transform_block_size(),
+						                                                    invq_step_width[layer], invq_applied_offset,
+						                                                    temporal_mask);
+					}
+				}
+			} catch (...) {
+				errors[tid] = std::current_exception();
+			}
+		};
+		for (unsigned t = 0; t < n_threads; ++t) {
+			const unsigned begin = (n_layers * t) / n_threads;
+			const unsigned end = (n_layers * (t + 1)) / n_threads;
+			threads.emplace_back(dequantize_range, begin, end, t);
 		}
+		for (auto &t : threads)
+			t.join();
+		for (auto &e : errors)
+			if (e)
+				std::rethrow_exception(e);
 	}
 
 	Surface residuals;

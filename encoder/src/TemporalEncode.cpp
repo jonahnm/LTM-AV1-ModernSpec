@@ -102,56 +102,58 @@ Surface TemporalCost_4x4::process(const Surface &sour_plane, const Surface &reco
 
 	const auto src = sour_plane.view_as<int16_t>();
 	const auto recon = reco_plane.view_as<int16_t>();
-	const auto symb00 = symb_plane[0].view_as<int16_t>();
-	const auto symb01 = symb_plane[1].view_as<int16_t>();
-	const auto symb02 = symb_plane[2].view_as<int16_t>();
-	const auto symb03 = symb_plane[3].view_as<int16_t>();
-	const auto symb04 = symb_plane[4].view_as<int16_t>();
-	const auto symb05 = symb_plane[5].view_as<int16_t>();
-	const auto symb06 = symb_plane[6].view_as<int16_t>();
-	const auto symb07 = symb_plane[7].view_as<int16_t>();
-	const auto symb08 = symb_plane[8].view_as<int16_t>();
-	const auto symb09 = symb_plane[9].view_as<int16_t>();
-	const auto symb10 = symb_plane[10].view_as<int16_t>();
-	const auto symb11 = symb_plane[11].view_as<int16_t>();
-	const auto symb12 = symb_plane[12].view_as<int16_t>();
-	const auto symb13 = symb_plane[13].view_as<int16_t>();
-	const auto symb14 = symb_plane[14].view_as<int16_t>();
-	const auto symb15 = symb_plane[15].view_as<int16_t>();
 
 	const unsigned dst_width = src.width() / transform_block_size;
 	const unsigned dst_height = src.height() / transform_block_size;
 
-	return Surface::build_from<int16_t>()
-	    .generate(dst_width, dst_height,
-	              [&](unsigned block_x, unsigned block_y) -> int16_t {
-		              // SAD term
-		              int32_t t0 = 0;
-		              for (unsigned int x = (block_x)*transform_block_size; x < (block_x + 1) * transform_block_size; ++x) {
-			              for (unsigned int y = (block_y)*transform_block_size; y < (block_y + 1) * transform_block_size; ++y) {
-				              t0 += abs(src.read(x, y) - recon.read(x, y));
-			              }
-		              }
+	const int16_t *srcp = src.data();
+	const int16_t *reconp = recon.data();
+	const ptrdiff_t src_stride = src.stride() / sizeof(int16_t);
+	const ptrdiff_t recon_stride = recon.stride() / sizeof(int16_t);
+	const int16_t *symb[16];
+	for (unsigned s = 0; s < 16; ++s)
+		symb[s] = symb_plane[s].view_as<int16_t>().data();
 
-		              // non zero residuals term
-		              int32_t t1 = 0;
-		              t1 = (symb00.read(block_x, block_y) ? 1 : 0) + (symb01.read(block_x, block_y) ? 1 : 0) +
-		                   (symb02.read(block_x, block_y) ? 1 : 0) + (symb03.read(block_x, block_y) ? 1 : 0) +
-		                   (symb04.read(block_x, block_y) ? 1 : 0) + (intra ? 1 : (symb05.read(block_x, block_y) ? 1 : 0)) +
-		                   (symb06.read(block_x, block_y) ? 1 : 0) + (symb07.read(block_x, block_y) ? 1 : 0) +
-		                   (symb08.read(block_x, block_y) ? 1 : 0) + (symb09.read(block_x, block_y) ? 1 : 0) +
-		                   (symb10.read(block_x, block_y) ? 1 : 0) + (symb11.read(block_x, block_y) ? 1 : 0) +
-		                   (symb12.read(block_x, block_y) ? 1 : 0) + (symb13.read(block_x, block_y) ? 1 : 0) +
-		                   (symb14.read(block_x, block_y) ? 1 : 0) + (symb15.read(block_x, block_y) ? 1 : 0);
+	auto dest = Surface::build_from<int16_t>();
+	dest.reserve(dst_width, dst_height);
+	int16_t *dst = dest.data();
+	const unsigned bs = transform_block_size;
 
-		              // Intra signalling term
-		              int32_t t2 = 0;
+	for (unsigned block_y = 0; block_y < dst_height; ++block_y) {
+		for (unsigned block_x = 0; block_x < dst_width; ++block_x, ++dst) {
+			// SAD term
+			int32_t t0 = 0;
+			const int16_t *sr = srcp + (ptrdiff_t)(block_y * bs) * src_stride + block_x * bs;
+			const int16_t *rr = reconp + (ptrdiff_t)(block_y * bs) * recon_stride + block_x * bs;
+			for (unsigned y = 0; y < bs; ++y) {
+				for (unsigned x = 0; x < bs; ++x)
+					t0 += abs((int)sr[x] - (int)rr[x]);
+				sr += src_stride;
+				rr += recon_stride;
+			}
 
-		              float fCost = (float)(t0 + scale * (t1 + t2));
-		              int32_t iCost = (fCost < ((1 << 15) - 1) ? (int)fCost : ((1 << 15) - 1));
-		              return (int16_t)(iCost);
-	              })
-	    .finish();
+			// non zero residuals term
+			int32_t t1 = 0;
+			t1 = (symb[0][block_y * dst_width + block_x] ? 1 : 0) + (symb[1][block_y * dst_width + block_x] ? 1 : 0) +
+			     (symb[2][block_y * dst_width + block_x] ? 1 : 0) + (symb[3][block_y * dst_width + block_x] ? 1 : 0) +
+			     (symb[4][block_y * dst_width + block_x] ? 1 : 0) +
+			     (intra ? 1 : (symb[5][block_y * dst_width + block_x] ? 1 : 0)) +
+			     (symb[6][block_y * dst_width + block_x] ? 1 : 0) + (symb[7][block_y * dst_width + block_x] ? 1 : 0) +
+			     (symb[8][block_y * dst_width + block_x] ? 1 : 0) + (symb[9][block_y * dst_width + block_x] ? 1 : 0) +
+			     (symb[10][block_y * dst_width + block_x] ? 1 : 0) + (symb[11][block_y * dst_width + block_x] ? 1 : 0) +
+			     (symb[12][block_y * dst_width + block_x] ? 1 : 0) + (symb[13][block_y * dst_width + block_x] ? 1 : 0) +
+			     (symb[14][block_y * dst_width + block_x] ? 1 : 0) + (symb[15][block_y * dst_width + block_x] ? 1 : 0);
+
+			// Intra signalling term
+			int32_t t2 = 0;
+
+			float fCost = (float)(t0 + scale * (t1 + t2));
+			int32_t iCost = (fCost < ((1 << 15) - 1) ? (int)fCost : ((1 << 15) - 1));
+			*dst = (int16_t)(iCost);
+		}
+	}
+
+	return dest.finish();
 }
 
 // Calculate temporal cost solely based on SAD, used for no_enhancement part

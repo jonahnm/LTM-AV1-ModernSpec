@@ -37,6 +37,9 @@
 //
 
 #include <cstdint>
+#include <algorithm>
+#include <thread>
+#include <vector>
 #include "TransformDDS.hpp"
 #include "Config.hpp"
 
@@ -86,356 +89,54 @@ void TransformDDS::process(const Surface &residuals, EncodingMode mode, Surface 
 
 #if defined __OPT_MATRIX__
 
-	if (encode_flags.encode_residual(0)) {
-		auto dest = Surface::build_from<int16_t>();
-		dest.reserve(width, height);
-		for (unsigned y = 0; y < height; ++y) {
-			int k = 4 * y;
-			for (unsigned x = 0; x < width; ++x) {
-				// {+1, +1, +1, +1, +1, +1, +1, +1, +1, +1, +1, +1, +1, +1, +1, +1},  // 0,0
-				int h = 4 * x;
-				int32_t coef = (src.read(h + 0, k + 0) + src.read(h + 1, k + 0) + src.read(h + 2, k + 0) + src.read(h + 3, k + 0) +
-				                src.read(h + 0, k + 1) + src.read(h + 1, k + 1) + src.read(h + 2, k + 1) + src.read(h + 3, k + 1) +
-				                src.read(h + 0, k + 2) + src.read(h + 1, k + 2) + src.read(h + 2, k + 2) + src.read(h + 3, k + 2) +
-				                src.read(h + 0, k + 3) + src.read(h + 1, k + 3) + src.read(h + 2, k + 3) + src.read(h + 3, k + 3)) /
-				               16;
-				dest.write(x, y, coef);
+	// Process each layer in parallel - every layer only reads the source surface and writes
+	// its own output layer, so the 16 layer transforms are independent
+	{
+		std::vector<std::thread> threads;
+		const unsigned n_layers = 16;
+		const unsigned n_threads = std::min(n_layers, std::max(1u, std::thread::hardware_concurrency()));
+		auto transform_range = [&](unsigned begin, unsigned end) {
+			const int16_t *srcp = src.data();
+			const ptrdiff_t src_stride = src.stride() / sizeof(int16_t); // stride is in bytes
+			for (unsigned l = begin; l < end; ++l) {
+				if (encode_flags.encode_residual(l)) {
+					const int32_t *b = basis[l];
+					auto dest = Surface::build_from<int16_t>();
+					dest.reserve(width, height);
+					int16_t *dst = dest.data();
+					for (unsigned y = 0; y < height; ++y) {
+						const int16_t *r0 = srcp + (ptrdiff_t)(4 * y) * src_stride;
+						const int16_t *r1 = r0 + src_stride;
+						const int16_t *r2 = r1 + src_stride;
+						const int16_t *r3 = r2 + src_stride;
+						for (unsigned x = 0; x < width; ++x, dst += 1) {
+							const int16_t *c0 = r0 + 4 * x;
+							const int16_t *c1 = r1 + 4 * x;
+							const int16_t *c2 = r2 + 4 * x;
+							const int16_t *c3 = r3 + 4 * x;
+							const int32_t coef =
+							    (c0[0] * b[0] + c0[1] * b[1] + c0[2] * b[2] + c0[3] * b[3] + c1[0] * b[4] + c1[1] * b[5] +
+							     c1[2] * b[6] + c1[3] * b[7] + c2[0] * b[8] + c2[1] * b[9] + c2[2] * b[10] + c2[3] * b[11] +
+							     c3[0] * b[12] + c3[1] * b[13] + c3[2] * b[14] + c3[3] * b[15]) /
+							    16;
+							*dst = (int16_t)coef;
+						}
+					}
+					layers[l] = dest.finish();
+				} else {
+					layers[l] = Surface::build_from<int16_t>()
+					                .generate(width, height, [](unsigned x, unsigned y) -> int16_t { return 0; })
+					                .finish();
+				}
 			}
+		};
+		for (unsigned t = 0; t < n_threads; ++t) {
+			const unsigned begin = (n_layers * t) / n_threads;
+			const unsigned end = (n_layers * (t + 1)) / n_threads;
+			threads.emplace_back(transform_range, begin, end);
 		}
-		layers[0] = dest.finish();
-	} else {
-		layers[0] =
-		    Surface::build_from<int16_t>().generate(width, height, [](unsigned x, unsigned y) -> int16_t { return 0; }).finish();
-	}
-
-	if (encode_flags.encode_residual(1)) {
-		auto dest = Surface::build_from<int16_t>();
-		dest.reserve(width, height);
-		for (unsigned y = 0; y < height; ++y) {
-			int k = 4 * y;
-			for (unsigned x = 0; x < width; ++x) {
-				// {+1, +1, -1, -1, +1, +1, -1, -1, +1, +1, -1, -1, +1, +1, -1, -1},  // 1,0
-				int h = 4 * x;
-				int32_t coef = (src.read(h + 0, k + 0) + src.read(h + 1, k + 0) - src.read(h + 2, k + 0) - src.read(h + 3, k + 0) +
-				                src.read(h + 0, k + 1) + src.read(h + 1, k + 1) - src.read(h + 2, k + 1) - src.read(h + 3, k + 1) +
-				                src.read(h + 0, k + 2) + src.read(h + 1, k + 2) - src.read(h + 2, k + 2) - src.read(h + 3, k + 2) +
-				                src.read(h + 0, k + 3) + src.read(h + 1, k + 3) - src.read(h + 2, k + 3) - src.read(h + 3, k + 3)) /
-				               16;
-				dest.write(x, y, coef);
-			}
-		}
-		layers[1] = dest.finish();
-	} else {
-		layers[1] =
-		    Surface::build_from<int16_t>().generate(width, height, [](unsigned x, unsigned y) -> int16_t { return 0; }).finish();
-	}
-
-	if (encode_flags.encode_residual(2)) {
-		auto dest = Surface::build_from<int16_t>();
-		dest.reserve(width, height);
-		for (unsigned y = 0; y < height; ++y) {
-			int k = 4 * y;
-			for (unsigned x = 0; x < width; ++x) {
-				// {+1, +1, +1, +1, +1, +1, +1, +1, -1, -1, -1, -1, -1, -1, -1, -1},  // 2,0
-				int h = 4 * x;
-				int32_t coef = (src.read(h + 0, k + 0) + src.read(h + 1, k + 0) + src.read(h + 2, k + 0) + src.read(h + 3, k + 0) +
-				                src.read(h + 0, k + 1) + src.read(h + 1, k + 1) + src.read(h + 2, k + 1) + src.read(h + 3, k + 1) -
-				                src.read(h + 0, k + 2) - src.read(h + 1, k + 2) - src.read(h + 2, k + 2) - src.read(h + 3, k + 2) -
-				                src.read(h + 0, k + 3) - src.read(h + 1, k + 3) - src.read(h + 2, k + 3) - src.read(h + 3, k + 3)) /
-				               16;
-				dest.write(x, y, coef);
-			}
-		}
-		layers[2] = dest.finish();
-	} else {
-		layers[2] =
-		    Surface::build_from<int16_t>().generate(width, height, [](unsigned x, unsigned y) -> int16_t { return 0; }).finish();
-	}
-
-	if (encode_flags.encode_residual(3)) {
-		auto dest = Surface::build_from<int16_t>();
-		dest.reserve(width, height);
-		for (unsigned y = 0; y < height; ++y) {
-			int k = 4 * y;
-			for (unsigned x = 0; x < width; ++x) {
-				// {+1, +1, -1, -1, +1, +1, -1, -1, -1, -1, +1, +1, -1, -1, +1, +1},  // 3,0
-				int h = 4 * x;
-				int32_t coef = (src.read(h + 0, k + 0) + src.read(h + 1, k + 0) - src.read(h + 2, k + 0) - src.read(h + 3, k + 0) +
-				                src.read(h + 0, k + 1) + src.read(h + 1, k + 1) - src.read(h + 2, k + 1) - src.read(h + 3, k + 1) -
-				                src.read(h + 0, k + 2) - src.read(h + 1, k + 2) + src.read(h + 2, k + 2) + src.read(h + 3, k + 2) -
-				                src.read(h + 0, k + 3) - src.read(h + 1, k + 3) + src.read(h + 2, k + 3) + src.read(h + 3, k + 3)) /
-				               16;
-				dest.write(x, y, coef);
-			}
-		}
-		layers[3] = dest.finish();
-	} else {
-		layers[3] =
-		    Surface::build_from<int16_t>().generate(width, height, [](unsigned x, unsigned y) -> int16_t { return 0; }).finish();
-	}
-
-	if (encode_flags.encode_residual(4)) {
-		auto dest = Surface::build_from<int16_t>();
-		dest.reserve(width, height);
-		for (unsigned y = 0; y < height; ++y) {
-			int k = 4 * y;
-			for (unsigned x = 0; x < width; ++x) {
-				// {+1, -1, +1, -1, +1, -1, +1, -1, +1, -1, +1, -1, +1, -1, +1, -1},  // 0,1
-				int h = 4 * x;
-				int32_t coef = (src.read(h + 0, k + 0) - src.read(h + 1, k + 0) + src.read(h + 2, k + 0) - src.read(h + 3, k + 0) +
-				                src.read(h + 0, k + 1) - src.read(h + 1, k + 1) + src.read(h + 2, k + 1) - src.read(h + 3, k + 1) +
-				                src.read(h + 0, k + 2) - src.read(h + 1, k + 2) + src.read(h + 2, k + 2) - src.read(h + 3, k + 2) +
-				                src.read(h + 0, k + 3) - src.read(h + 1, k + 3) + src.read(h + 2, k + 3) - src.read(h + 3, k + 3)) /
-				               16;
-				dest.write(x, y, coef);
-			}
-		}
-		layers[4] = dest.finish();
-	} else {
-		layers[4] =
-		    Surface::build_from<int16_t>().generate(width, height, [](unsigned x, unsigned y) -> int16_t { return 0; }).finish();
-	}
-
-	if (encode_flags.encode_residual(5)) {
-		auto dest = Surface::build_from<int16_t>();
-		dest.reserve(width, height);
-		for (unsigned y = 0; y < height; ++y) {
-			int k = 4 * y;
-			for (unsigned x = 0; x < width; ++x) {
-				// {+1, -1, -1, +1, +1, -1, -1, +1, +1, -1, -1, +1, +1, -1, -1, +1},  // 1,1
-				int h = 4 * x;
-				int32_t coef = (src.read(h + 0, k + 0) - src.read(h + 1, k + 0) - src.read(h + 2, k + 0) + src.read(h + 3, k + 0) +
-				                src.read(h + 0, k + 1) - src.read(h + 1, k + 1) - src.read(h + 2, k + 1) + src.read(h + 3, k + 1) +
-				                src.read(h + 0, k + 2) - src.read(h + 1, k + 2) - src.read(h + 2, k + 2) + src.read(h + 3, k + 2) +
-				                src.read(h + 0, k + 3) - src.read(h + 1, k + 3) - src.read(h + 2, k + 3) + src.read(h + 3, k + 3)) /
-				               16;
-				dest.write(x, y, coef);
-			}
-		}
-		layers[5] = dest.finish();
-	} else {
-		layers[5] =
-		    Surface::build_from<int16_t>().generate(width, height, [](unsigned x, unsigned y) -> int16_t { return 0; }).finish();
-	}
-
-	if (encode_flags.encode_residual(6)) {
-		auto dest = Surface::build_from<int16_t>();
-		dest.reserve(width, height);
-		for (unsigned y = 0; y < height; ++y) {
-			int k = 4 * y;
-			for (unsigned x = 0; x < width; ++x) {
-				// {+1, -1, +1, -1, +1, -1, +1, -1, -1, +1, -1, +1, -1, +1, -1, +1},  // 2,1
-				int h = 4 * x;
-				int32_t coef = (src.read(h + 0, k + 0) - src.read(h + 1, k + 0) + src.read(h + 2, k + 0) - src.read(h + 3, k + 0) +
-				                src.read(h + 0, k + 1) - src.read(h + 1, k + 1) + src.read(h + 2, k + 1) - src.read(h + 3, k + 1) -
-				                src.read(h + 0, k + 2) + src.read(h + 1, k + 2) - src.read(h + 2, k + 2) + src.read(h + 3, k + 2) -
-				                src.read(h + 0, k + 3) + src.read(h + 1, k + 3) - src.read(h + 2, k + 3) + src.read(h + 3, k + 3)) /
-				               16;
-				dest.write(x, y, coef);
-			}
-		}
-		layers[6] = dest.finish();
-	} else {
-		layers[6] =
-		    Surface::build_from<int16_t>().generate(width, height, [](unsigned x, unsigned y) -> int16_t { return 0; }).finish();
-	}
-
-	if (encode_flags.encode_residual(7)) {
-		auto dest = Surface::build_from<int16_t>();
-		dest.reserve(width, height);
-		for (unsigned y = 0; y < height; ++y) {
-			int k = 4 * y;
-			for (unsigned x = 0; x < width; ++x) {
-				// {+1, -1, -1, +1, +1, -1, -1, +1, -1, +1, +1, -1, -1, +1, +1, -1},  // 3.1
-				int h = 4 * x;
-				int32_t coef = (src.read(h + 0, k + 0) - src.read(h + 1, k + 0) - src.read(h + 2, k + 0) + src.read(h + 3, k + 0) +
-				                src.read(h + 0, k + 1) - src.read(h + 1, k + 1) - src.read(h + 2, k + 1) + src.read(h + 3, k + 1) -
-				                src.read(h + 0, k + 2) + src.read(h + 1, k + 2) + src.read(h + 2, k + 2) - src.read(h + 3, k + 2) -
-				                src.read(h + 0, k + 3) + src.read(h + 1, k + 3) + src.read(h + 2, k + 3) - src.read(h + 3, k + 3)) /
-				               16;
-				dest.write(x, y, coef);
-			}
-		}
-		layers[7] = dest.finish();
-	} else {
-		layers[7] =
-		    Surface::build_from<int16_t>().generate(width, height, [](unsigned x, unsigned y) -> int16_t { return 0; }).finish();
-	}
-
-	if (encode_flags.encode_residual(8)) {
-		auto dest = Surface::build_from<int16_t>();
-		dest.reserve(width, height);
-		for (unsigned y = 0; y < height; ++y) {
-			int k = 4 * y;
-			for (unsigned x = 0; x < width; ++x) {
-				// {+1, +1, +1, +1, -1, -1, -1, -1, +1, +1, +1, +1, -1, -1, -1, -1},  // 0,2
-				int h = 4 * x;
-				int32_t coef = (src.read(h + 0, k + 0) + src.read(h + 1, k + 0) + src.read(h + 2, k + 0) + src.read(h + 3, k + 0) -
-				                src.read(h + 0, k + 1) - src.read(h + 1, k + 1) - src.read(h + 2, k + 1) - src.read(h + 3, k + 1) +
-				                src.read(h + 0, k + 2) + src.read(h + 1, k + 2) + src.read(h + 2, k + 2) + src.read(h + 3, k + 2) -
-				                src.read(h + 0, k + 3) - src.read(h + 1, k + 3) - src.read(h + 2, k + 3) - src.read(h + 3, k + 3)) /
-				               16;
-				dest.write(x, y, coef);
-			}
-		}
-		layers[8] = dest.finish();
-	} else {
-		layers[8] =
-		    Surface::build_from<int16_t>().generate(width, height, [](unsigned x, unsigned y) -> int16_t { return 0; }).finish();
-	}
-
-	if (encode_flags.encode_residual(9)) {
-		auto dest = Surface::build_from<int16_t>();
-		dest.reserve(width, height);
-		for (unsigned y = 0; y < height; ++y) {
-			int k = 4 * y;
-			for (unsigned x = 0; x < width; ++x) {
-				// {+1, +1, -1, -1, -1, -1, +1, +1, +1, +1, -1, -1, -1, -1, +1, +1},  // 1,2
-				int h = 4 * x;
-				int32_t coef = (src.read(h + 0, k + 0) + src.read(h + 1, k + 0) - src.read(h + 2, k + 0) - src.read(h + 3, k + 0) -
-				                src.read(h + 0, k + 1) - src.read(h + 1, k + 1) + src.read(h + 2, k + 1) + src.read(h + 3, k + 1) +
-				                src.read(h + 0, k + 2) + src.read(h + 1, k + 2) - src.read(h + 2, k + 2) - src.read(h + 3, k + 2) -
-				                src.read(h + 0, k + 3) - src.read(h + 1, k + 3) + src.read(h + 2, k + 3) + src.read(h + 3, k + 3)) /
-				               16;
-				dest.write(x, y, coef);
-			}
-		}
-		layers[9] = dest.finish();
-	} else {
-		layers[9] =
-		    Surface::build_from<int16_t>().generate(width, height, [](unsigned x, unsigned y) -> int16_t { return 0; }).finish();
-	}
-
-	if (encode_flags.encode_residual(10)) {
-		auto dest = Surface::build_from<int16_t>();
-		dest.reserve(width, height);
-		for (unsigned y = 0; y < height; ++y) {
-			int k = 4 * y;
-			for (unsigned x = 0; x < width; ++x) {
-				// {+1, +1, +1, +1, -1, -1, -1, -1, -1, -1, -1, -1, +1, +1, +1, +1},  // 2,2
-				int h = 4 * x;
-				int32_t coef = (src.read(h + 0, k + 0) + src.read(h + 1, k + 0) + src.read(h + 2, k + 0) + src.read(h + 3, k + 0) -
-				                src.read(h + 0, k + 1) - src.read(h + 1, k + 1) - src.read(h + 2, k + 1) - src.read(h + 3, k + 1) -
-				                src.read(h + 0, k + 2) - src.read(h + 1, k + 2) - src.read(h + 2, k + 2) - src.read(h + 3, k + 2) +
-				                src.read(h + 0, k + 3) + src.read(h + 1, k + 3) + src.read(h + 2, k + 3) + src.read(h + 3, k + 3)) /
-				               16;
-				dest.write(x, y, coef);
-			}
-		}
-		layers[10] = dest.finish();
-	} else {
-		layers[10] =
-		    Surface::build_from<int16_t>().generate(width, height, [](unsigned x, unsigned y) -> int16_t { return 0; }).finish();
-	}
-
-	if (encode_flags.encode_residual(11)) {
-		auto dest = Surface::build_from<int16_t>();
-		dest.reserve(width, height);
-		for (unsigned y = 0; y < height; ++y) {
-			int k = 4 * y;
-			for (unsigned x = 0; x < width; ++x) {
-				// {+1, +1, -1, -1, -1, -1, +1, +1, -1, -1, +1, +1, +1, +1, -1, -1},  // 3,2
-				int h = 4 * x;
-				int32_t coef = (src.read(h + 0, k + 0) + src.read(h + 1, k + 0) - src.read(h + 2, k + 0) - src.read(h + 3, k + 0) -
-				                src.read(h + 0, k + 1) - src.read(h + 1, k + 1) + src.read(h + 2, k + 1) + src.read(h + 3, k + 1) -
-				                src.read(h + 0, k + 2) - src.read(h + 1, k + 2) + src.read(h + 2, k + 2) + src.read(h + 3, k + 2) +
-				                src.read(h + 0, k + 3) + src.read(h + 1, k + 3) - src.read(h + 2, k + 3) - src.read(h + 3, k + 3)) /
-				               16;
-				dest.write(x, y, coef);
-			}
-		}
-		layers[11] = dest.finish();
-	} else {
-		layers[11] =
-		    Surface::build_from<int16_t>().generate(width, height, [](unsigned x, unsigned y) -> int16_t { return 0; }).finish();
-	}
-
-	if (encode_flags.encode_residual(12)) {
-		auto dest = Surface::build_from<int16_t>();
-		dest.reserve(width, height);
-		for (unsigned y = 0; y < height; ++y) {
-			int k = 4 * y;
-			for (unsigned x = 0; x < width; ++x) {
-				// {+1, -1, +1, -1, -1, +1, -1, +1, +1, -1, +1, -1, -1, +1, -1, +1},  // 0,3
-				int h = 4 * x;
-				int32_t coef = (src.read(h + 0, k + 0) - src.read(h + 1, k + 0) + src.read(h + 2, k + 0) - src.read(h + 3, k + 0) -
-				                src.read(h + 0, k + 1) + src.read(h + 1, k + 1) - src.read(h + 2, k + 1) + src.read(h + 3, k + 1) +
-				                src.read(h + 0, k + 2) - src.read(h + 1, k + 2) + src.read(h + 2, k + 2) - src.read(h + 3, k + 2) -
-				                src.read(h + 0, k + 3) + src.read(h + 1, k + 3) - src.read(h + 2, k + 3) + src.read(h + 3, k + 3)) /
-				               16;
-				dest.write(x, y, coef);
-			}
-		}
-		layers[12] = dest.finish();
-	} else {
-		layers[12] =
-		    Surface::build_from<int16_t>().generate(width, height, [](unsigned x, unsigned y) -> int16_t { return 0; }).finish();
-	}
-
-	if (encode_flags.encode_residual(13)) {
-		auto dest = Surface::build_from<int16_t>();
-		dest.reserve(width, height);
-		for (unsigned y = 0; y < height; ++y) {
-			int k = 4 * y;
-			for (unsigned x = 0; x < width; ++x) {
-				// {+1, -1, -1, +1, -1, +1, +1, -1, +1, -1, -1, +1, -1, +1, +1, -1},  // 1,3
-				int h = 4 * x;
-				int32_t coef = (src.read(h + 0, k + 0) - src.read(h + 1, k + 0) - src.read(h + 2, k + 0) + src.read(h + 3, k + 0) -
-				                src.read(h + 0, k + 1) + src.read(h + 1, k + 1) + src.read(h + 2, k + 1) - src.read(h + 3, k + 1) +
-				                src.read(h + 0, k + 2) - src.read(h + 1, k + 2) - src.read(h + 2, k + 2) + src.read(h + 3, k + 2) -
-				                src.read(h + 0, k + 3) + src.read(h + 1, k + 3) + src.read(h + 2, k + 3) - src.read(h + 3, k + 3)) /
-				               16;
-				dest.write(x, y, coef);
-			}
-		}
-		layers[13] = dest.finish();
-	} else {
-		layers[13] =
-		    Surface::build_from<int16_t>().generate(width, height, [](unsigned x, unsigned y) -> int16_t { return 0; }).finish();
-	}
-
-	if (encode_flags.encode_residual(14)) {
-		auto dest = Surface::build_from<int16_t>();
-		dest.reserve(width, height);
-		for (unsigned y = 0; y < height; ++y) {
-			int k = 4 * y;
-			for (unsigned x = 0; x < width; ++x) {
-				// {+1, -1, +1, -1, -1, +1, -1, +1, -1, +1, -1, +1, +1, -1, +1, -1},  // 2,3
-				int h = 4 * x;
-				int32_t coef = (src.read(h + 0, k + 0) - src.read(h + 1, k + 0) + src.read(h + 2, k + 0) - src.read(h + 3, k + 0) -
-				                src.read(h + 0, k + 1) + src.read(h + 1, k + 1) - src.read(h + 2, k + 1) + src.read(h + 3, k + 1) -
-				                src.read(h + 0, k + 2) + src.read(h + 1, k + 2) - src.read(h + 2, k + 2) + src.read(h + 3, k + 2) +
-				                src.read(h + 0, k + 3) - src.read(h + 1, k + 3) + src.read(h + 2, k + 3) - src.read(h + 3, k + 3)) /
-				               16;
-				dest.write(x, y, coef);
-			}
-		}
-		layers[14] = dest.finish();
-	} else {
-		layers[14] =
-		    Surface::build_from<int16_t>().generate(width, height, [](unsigned x, unsigned y) -> int16_t { return 0; }).finish();
-	}
-
-	if (encode_flags.encode_residual(15)) {
-		auto dest = Surface::build_from<int16_t>();
-		dest.reserve(width, height);
-		for (unsigned y = 0; y < height; ++y) {
-			int k = 4 * y;
-			for (unsigned x = 0; x < width; ++x) {
-				// {+1, -1, -1, +1, -1, +1, +1, -1, -1, +1, +1, -1, +1, -1, -1, +1},  // 3,3
-				int h = 4 * x;
-				int32_t coef = (src.read(h + 0, k + 0) - src.read(h + 1, k + 0) - src.read(h + 2, k + 0) + src.read(h + 3, k + 0) -
-				                src.read(h + 0, k + 1) + src.read(h + 1, k + 1) + src.read(h + 2, k + 1) - src.read(h + 3, k + 1) -
-				                src.read(h + 0, k + 2) + src.read(h + 1, k + 2) + src.read(h + 2, k + 2) - src.read(h + 3, k + 2) +
-				                src.read(h + 0, k + 3) - src.read(h + 1, k + 3) - src.read(h + 2, k + 3) + src.read(h + 3, k + 3)) /
-				               16;
-				dest.write(x, y, coef);
-			}
-		}
-		layers[15] = dest.finish();
-	} else {
-		layers[15] =
-		    Surface::build_from<int16_t>().generate(width, height, [](unsigned x, unsigned y) -> int16_t { return 0; }).finish();
+		for (auto &t : threads)
+			t.join();
 	}
 
 #else

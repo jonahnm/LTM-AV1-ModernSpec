@@ -48,8 +48,26 @@ Surface Subtract::process(const Surface &plane_a, const Surface &plane_b) {
 
 	CHECK(a.width() == b.width() && a.height() == b.height());
 
-	return Surface::build_from<int16_t>()
-	    .generate(a.width(), a.height(), [&](unsigned x, unsigned y) -> int16_t { return a.read(x, y) - b.read(x, y); })
-	    .finish();
+	const unsigned width = a.width();
+	const unsigned height = a.height();
+	const ptrdiff_t a_stride = a.stride() / sizeof(int16_t);
+	const ptrdiff_t b_stride = b.stride() / sizeof(int16_t);
+	const int16_t *ap = a.data();
+	const int16_t *bp = b.data();
+
+	auto dest = Surface::build_from<int16_t>();
+	dest.reserve(width, height);
+	int16_t *dst = dest.data();
+	const ptrdiff_t dst_stride = dest.stride() / sizeof(int16_t);
+
+	for (unsigned y = 0; y < height; ++y) {
+		const int16_t *ar = ap + (ptrdiff_t)y * a_stride;
+		const int16_t *br = bp + (ptrdiff_t)y * b_stride;
+		int16_t *dr = dst + (ptrdiff_t)y * dst_stride;
+		for (unsigned x = 0; x < width; ++x)
+			dr[x] = (int16_t)(ar[x] - br[x]);
+	}
+
+	return dest.finish();
 }
 } // namespace lctm

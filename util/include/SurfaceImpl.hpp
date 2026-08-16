@@ -258,6 +258,8 @@ template <typename T, unsigned S> const T *SurfaceView<T, S>::data(unsigned x, u
 
 template <typename T, unsigned S> T SurfaceView<T, S>::read(unsigned x, unsigned y) const { return *data(x, y); }
 
+template <typename T, unsigned S> unsigned SurfaceView<T, S>::stride() const { return mapped_stride_; }
+
 template <typename T, unsigned S> unsigned SurfaceView<T, S>::width() const { return surface_.width_; }
 
 template <typename T, unsigned S> unsigned SurfaceView<T, S>::height() const { return surface_.height_; }
