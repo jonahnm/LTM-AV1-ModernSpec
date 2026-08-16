@@ -32,6 +32,7 @@
 //
 
 #include <cstdint>
+#include <cstring>
 #include "uESFile.h"
 #include "Diagnostics.hpp"
 
@@ -278,19 +279,100 @@ ESFile::Result ESFile::ReadAccessUnitU32Length(AccessUnit &out) {
 	}
 }
 
-// Read an access unit from a low overhead OBU stream (AV1). Each OBU is framed as:
-//   obu_header, [obu_extension_header], leb128(obu_size), obu_payload
-// An access unit is terminated by the next temporal delimiter OBU (which itself belongs to the
-// following access unit).
+// Read an access unit from an AV1 stream. Two framings are supported:
+//  - low overhead OBU stream: each OBU is framed as
+//      obu_header, [obu_extension_header], leb128(obu_size), obu_payload
+//    and an access unit is terminated by the next temporal delimiter OBU (which itself
+//    belongs to the following access unit)
+//  - IVF container (the output of SvtAv1EncApp versions without --obu, and its default):
+//    a 32-byte "DKIF" stream header followed by per-frame [12-byte header][OBU payload]
+//    records, each payload being one complete access unit
 //
 ESFile::Result ESFile::ReadAccessUnitOBU(AccessUnit &out) {
 	if (m_file == nullptr)
 		return NoFile;
 
+	// Detect the IVF container on the first access unit: read its 4-byte magic into the
+	// lookahead buffer and replay it through the byte source (a pipe cannot be rewound, and
+	// ungetc does not reliably push back more than one byte)
+	if (!m_ivf_checked) {
+		m_ivf_checked = true;
+
+		unsigned char magic[4];
+		const size_t got = fread(magic, 1, sizeof(magic), m_file);
+		m_lookahead.assign(magic, magic + got);
+		m_ivf = (got == sizeof(magic) && memcmp(magic, "DKIF", 4) == 0);
+	}
+
+	if (m_ivf)
+		return ReadAccessUnitIVF(out);
+
+	return ParseAccessUnitOBUs(out, nullptr, 0);
+}
+
+// Read an access unit from an IVF container: skip the 32-byte stream header once, then read
+// one [4-byte LE size][8-byte timestamp] frame header and the frame payload, which contains
+// the whole access unit as OBUs.
+//
+ESFile::Result ESFile::ReadAccessUnitIVF(AccessUnit &out) {
+	if (!m_ivf_stream_header_skipped) {
+		m_ivf_stream_header_skipped = true;
+
+		// 32-byte IVF stream header; the 4 magic bytes are already in the lookahead buffer
+		unsigned char header[32];
+		memcpy(header, m_lookahead.data(), m_lookahead.size());
+		const size_t got = fread(header + m_lookahead.size(), 1, sizeof(header) - m_lookahead.size(), m_file);
+		if (got + m_lookahead.size() != sizeof(header))
+			return EndOfFile;
+		m_lookahead.clear();
+	}
+
+	// Read the 12-byte IVF frame header (4-byte little-endian size + 8-byte timestamp)
+	unsigned char frame_header[12];
+	size_t got = fread(frame_header, 1, sizeof(frame_header), m_file);
+	if (got == 0)
+		return EndOfFile;
+	if (got != sizeof(frame_header))
+		return NalParsingError;
+
+	const uint32_t frame_size = (uint32_t)frame_header[0] | ((uint32_t)frame_header[1] << 8) |
+	                            ((uint32_t)frame_header[2] << 16) | ((uint32_t)frame_header[3] << 24);
+
+	utility::DataBuffer payload(frame_size);
+	if (payload.size() != frame_size)
+		return NalParsingError;
+	if (fread(payload.data(), 1, frame_size, m_file) != frame_size)
+		return NalParsingError;
+
+	return ParseAccessUnitOBUs(out, payload.data(), payload.size());
+}
+
+// Parse access units from an OBU byte source. With 'buf' set, the OBUs are read from that
+// memory buffer (one IVF frame payload = one access unit); otherwise they are read from the
+// file, replaying any detection lookahead first. An access unit ends at the next temporal
+// delimiter, or at the end of the source.
+//
+ESFile::Result ESFile::ParseAccessUnitOBUs(AccessUnit &out, const uint8_t *buf, size_t len) {
 	utility::DataBuffer buffer;
 	std::vector<NalUnit> nalUnits;
 	int32_t size = 0;
 	bool seen_frame = false;
+	size_t pos = 0;
+
+	// Return the next byte of the source (EOF at the end)
+	auto next_byte = [&]() -> int {
+		if (buf) {
+			if (pos < len)
+				return buf[pos++];
+			return EOF;
+		}
+		if (!m_lookahead.empty()) {
+			const int c = m_lookahead.front();
+			m_lookahead.erase(m_lookahead.begin());
+			return c;
+		}
+		return fgetc(m_file);
+	};
 
 	// A temporal delimiter read at the end of the previous access unit starts the next one
 	// (pipes/FIFOs cannot be rewound, so the delimiter is buffered rather than seeked back)
@@ -308,7 +390,7 @@ ESFile::Result ESFile::ReadAccessUnitOBU(AccessUnit &out) {
 
 	while (true) {
 		// Read OBU header byte
-		const int c = fgetc(m_file);
+		const int c = next_byte();
 		if (c == EOF) {
 			// End of file - flush any remaining AU
 			if (!nalUnits.empty()) {
@@ -330,7 +412,7 @@ ESFile::Result ESFile::ReadAccessUnitOBU(AccessUnit &out) {
 
 		// OBU extension header
 		if ((header >> 2) & 0x01) {
-			const int ext = fgetc(m_file);
+			const int ext = next_byte();
 			if (ext == EOF)
 				return NalParsingError;
 			buffer.push_back((uint8_t)ext);
@@ -341,7 +423,7 @@ ESFile::Result ESFile::ReadAccessUnitOBU(AccessUnit &out) {
 		if ((header >> 1) & 0x01) {
 			unsigned i = 0;
 			while (true) {
-				const int s = fgetc(m_file);
+				const int s = next_byte();
 				if (s == EOF)
 					return NalParsingError;
 				buffer.push_back((uint8_t)s);
@@ -357,7 +439,7 @@ ESFile::Result ESFile::ReadAccessUnitOBU(AccessUnit &out) {
 
 		// Read OBU payload
 		for (uint64_t n = 0; n < payload_size; ++n) {
-			const int p = fgetc(m_file);
+			const int p = next_byte();
 			if (p == EOF)
 				return NalParsingError;
 			buffer.push_back((uint8_t)p);

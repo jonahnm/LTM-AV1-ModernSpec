@@ -128,6 +128,31 @@ static string codec_executable(const string &name) {
 	return name;
 }
 
+// SVT-AV1 versions before 4.0 do not accept the --obu flag and always write an IVF container;
+// newer versions default to IVF too and need --obu for the raw low-overhead OBU stream. Probe
+// the installed binary once for --obu support and cache the result.
+//
+static bool svt_supports_obu_flag() {
+	// Debug/testing escape hatch: LCEVC_SVT_NO_OBU forces the IVF container path
+	if (getenv("LCEVC_SVT_NO_OBU"))
+		return false;
+
+	static const bool supported = []() {
+		const string prog = codec_executable("SVT-AV1/SvtAv1EncApp");
+		FILE *p = LCEVC_POPEN(format("%s --help 2>&1", prog.c_str()).c_str(), "r");
+		if (!p)
+			return false;
+		std::string help;
+		char buf[4096];
+		size_t n;
+		while ((n = fread(buf, 1, sizeof(buf), p)) > 0)
+			help.append(buf, n);
+		LCEVC_PCLOSE(p);
+		return help.find("--obu") != std::string::npos;
+	}();
+	return supported;
+}
+
 // Implementation is specialised for base codec
 //
 class FileEncoderImpl : public FileEncoder {
@@ -1740,11 +1765,15 @@ public:
 		const string prog = codec_executable("SVT-AV1/SvtAv1EncApp");
 		const unsigned qp = encoder_.base_qp();
 
+		// --obu selects the raw low-overhead OBU stream on SVT-AV1 4.0+; older versions write
+		// an IVF container instead, which the AV1 reader handles transparently
+		const string obu_flag = svt_supports_obu_flag() ? "--obu " : "";
+
 		return format("%s -i %s -w %d -h %d --fps-num %d --fps-denom 1 --input-depth %d --qp %d --preset 8 "
-		              "--pred-struct 1 --enable-tf 0 --keyint %d -n 0 --obu -b %s --progress 0",
+		              "--pred-struct 1 --enable-tf 0 --keyint %d -n 0 %s-b %s --progress 0",
 		              prog.c_str(), input_fifo.c_str(), encoder_.base_image_description().width(),
 		              encoder_.base_image_description().height(), fps_, encoder_.base_image_description().bit_depth(), qp,
-		              intra_period(), es_fifo.c_str());
+		              intra_period(), obu_flag.c_str(), es_fifo.c_str());
 	}
 #endif
 
@@ -1760,11 +1789,14 @@ public:
 		const string prog = codec_executable("SVT-AV1/SvtAv1EncApp");
 		const unsigned qp = encoder_.base_qp();
 
+		const string obu_flag = svt_supports_obu_flag() ? "--obu " : "";
+
 		string cmd_line =
 		    format("%s -i stdin -w %d -h %d --fps-num %d --fps-denom 1 --input-depth %d --qp %d --preset 8 "
-		           "--pred-struct 1 --enable-tf 0 --keyint %d -n %d --obu -b %s --progress 0",
+		           "--pred-struct 1 --enable-tf 0 --keyint %d -n %d %s-b %s --progress 0",
 		           prog.c_str(), encoder_.base_image_description().width(), encoder_.base_image_description().height(), fps_,
-		           encoder_.base_image_description().bit_depth(), qp, intra_period(), frame_count, es_file.c_str());
+		           encoder_.base_image_description().bit_depth(), qp, intra_period(), frame_count, obu_flag.c_str(),
+		           es_file.c_str());
 
 		INFO("Running: %s", cmd_line.c_str());
 		return LCEVC_POPEN(cmd_line.c_str(), "w");
@@ -1865,12 +1897,14 @@ public:
 		const string prog = codec_executable("SVT-AV1/SvtAv1EncApp");
 		const unsigned qp = encoder_.base_qp();
 
+		const string obu_flag = svt_supports_obu_flag() ? "--obu " : "";
+
 		string cmd_line =
 		    format("%s -i %s -w %d -h %d --fps-num %d --fps-denom 1 --input-depth %d --qp %d --preset 8 "
-		           "--pred-struct 1 --enable-tf 0 --keyint %d -n %d --obu -b %s --progress 0 -o %s",
+		           "--pred-struct 1 --enable-tf 0 --keyint %d -n %d %s-b %s --progress 0 -o %s",
 		           prog.c_str(), yuv_file.c_str(), encoder_.base_image_description().width(),
 		           encoder_.base_image_description().height(), fps_, encoder_.base_image_description().bit_depth(), qp,
-		           intra_period(), frame_count, es_file.c_str(), recon_file.c_str());
+		           intra_period(), frame_count, obu_flag.c_str(), es_file.c_str(), recon_file.c_str());
 
 		INFO("Running: %s", cmd_line.c_str());
 		return system(cmd_line.c_str()) == 0;

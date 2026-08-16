@@ -112,6 +112,11 @@ private:
 	Result ReadAccessUnitU32Length(AccessUnit &out);
 	Result ReadAccessUnitOBU(AccessUnit &out);
 
+	// Shared OBU parsing core: parses access units from the stream (buf == nullptr) or from a
+	// complete IVF frame payload (buf/len), used by ReadAccessUnitOBU for both framings.
+	Result ParseAccessUnitOBUs(AccessUnit& out, const uint8_t *buf, size_t len);
+	Result ReadAccessUnitIVF(AccessUnit& out);
+
 	// Create a POC that always increases across IDR 
 	uint64_t GenerateIncreasingPOC();
 
@@ -127,6 +132,18 @@ private:
 	// Temporal delimiter that was read at the end of the previous AU - kept here because a
 	// pipe/FIFO input cannot be rewound; it is used to start the next AU instead
 	std::vector<unsigned char> m_pendingFirstNal;
+
+	// True when the stream is wrapped in an IVF container (SVT-AV1 versions without --obu, and
+	// all versions by default): a 32-byte "DKIF" stream header followed by 12-byte per-frame
+	// headers, with each frame payload being one complete access unit of OBUs
+	bool m_ivf = false;
+	bool m_ivf_checked = false;
+	bool m_ivf_stream_header_skipped = false;
+
+	// Bytes consumed during IVF detection that belong to the stream itself and must be
+	// replayed by the OBU reader (a pipe/FIFO cannot be rewound, and ungetc only guarantees
+	// a single byte of pushback)
+	std::vector<unsigned char> m_lookahead;
 
 	unsigned char * mpucBuffer;
 	int miBufferFullness;
