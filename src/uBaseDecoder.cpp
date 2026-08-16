@@ -207,7 +207,9 @@ bool BaseDecoder::ByteAligned() const {
 std::unique_ptr<BaseDecoder> CreateBaseDecoder(BaseDecoder::Codec base_codec) {
 	extern std::unique_ptr<BaseDecoder> CreateBaseDecoderAVC();
 	extern std::unique_ptr<BaseDecoder> CreateBaseDecoderHEVC();
+#if defined(LTM_ENABLE_VVC_PARSER)
 	extern std::unique_ptr<BaseDecoder> CreateBaseDecoderVVC();
+#endif
 	extern std::unique_ptr<BaseDecoder> CreateBaseDecoderEVC();
 	extern std::unique_ptr<BaseDecoder> CreateBaseDecoderAV1();
 	extern std::unique_ptr<BaseDecoder> CreateBaseDecoderYUV();
@@ -217,8 +219,10 @@ std::unique_ptr<BaseDecoder> CreateBaseDecoder(BaseDecoder::Codec base_codec) {
 		return std::unique_ptr<BaseDecoder>(CHECK(CreateBaseDecoderAVC()));
 	case BaseDecoder::HEVC:
 		return std::unique_ptr<BaseDecoder>(CHECK(CreateBaseDecoderHEVC()));
+#if defined(LTM_ENABLE_VVC_PARSER)
 	case BaseDecoder::VVC:
 		return std::unique_ptr<BaseDecoder>(CHECK(CreateBaseDecoderVVC()));
+#endif
 	case BaseDecoder::EVC:
 		return std::unique_ptr<BaseDecoder>(CHECK(CreateBaseDecoderEVC()));
 	case BaseDecoder::AV1:

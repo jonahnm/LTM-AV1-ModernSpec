@@ -12,6 +12,7 @@ option(LTM_ENABLE_CODECAPI_HEVC			"Use LTM Codec API for HEVC with HM in shared 
 option(LTM_ENABLE_CODECAPI_VVC			"Use LTM Codec API for VVC with VTM in shared library"						OFF)
 option(LTM_ENABLE_CODECAPI_EVC			"Use LTM Codec API for EVC with ETM in shared library"						OFF)
 option(LTM_BUILD_EXTERNAL_CODECS		"Compile base codecs from respective test model source"						ON)
+option(LTM_ENABLE_VVC_PARSER			"Build the in-tree VVC bitstream parser (minimum_VTM)"						ON)
 
 #
 set(SRC_DIR "${PROJECT_SOURCE_DIR}")
@@ -236,6 +237,11 @@ set_property(SOURCE
 set_property(SOURCE  ${SRC_DIR}/src/uBaseDecoderVVC.cpp  APPEND PROPERTY COMPILE_FLAGS
   "-I${DEPS_DIR}/base_vvc/minimum_VTM/source/Lib" )
 
+if(NOT LTM_ENABLE_VVC_PARSER)
+  list(REMOVE_ITEM DECODER_SRCS ${SRC_DIR}/src/uBaseDecoderVVC.cpp)
+  list(REMOVE_ITEM ENCODER_SRCS ${SRC_DIR}/src/uBaseDecoderVVC.cpp)
+endif()
+
 if(EXISTS "${CMAKE_SOURCE_DIR}/.git")
   message("Foo")
   # -----------------------------------------------
@@ -257,7 +263,9 @@ set(CXXOPTS_DIR "${DEPS_DIR}/cxxopts")
 set(JSON_DIR "${DEPS_DIR}/json")
 
 # VVC Parser
-add_subdirectory (deps/base_vvc/minimum_VTM)
+if(LTM_ENABLE_VVC_PARSER)
+  add_subdirectory (deps/base_vvc/minimum_VTM)
+endif()
 
 # -----------------------------------------------
 # ModelDecoder and ModelEncoder:
@@ -286,10 +294,16 @@ foreach(TARGET ${LCEVC_TARGETS})
 	"${CMAKE_BINARY_DIR}")
 
   # External libraries to link to
-  target_link_libraries(${TARGET} ${LCEVC_EXTERNAL_LINK_LIBS} BaseVvcMinimumVTM )
+  target_link_libraries(${TARGET} ${LCEVC_EXTERNAL_LINK_LIBS} )
+  if(LTM_ENABLE_VVC_PARSER)
+    target_link_libraries(${TARGET} BaseVvcMinimumVTM)
+  endif()
 
   # Compilation definitions
   target_compile_definitions(${TARGET} PRIVATE BITSTREAM_DEBUG=${LCEVC_BITSTREAM_DEBUG} USE_SEI_NALU=${LCEVC_USE_SEI_NALU})
+  if(LTM_ENABLE_VVC_PARSER)
+    target_compile_definitions(${TARGET} PRIVATE LTM_ENABLE_VVC_PARSER)
+  endif()
 
   if(EXISTS "${CMAKE_SOURCE_DIR}/.git")
 	# Make sure that the header file with git version number is
