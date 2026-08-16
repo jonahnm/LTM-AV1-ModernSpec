@@ -84,7 +84,9 @@
 
 #include <cassert>
 
+#include <mutex>
 #include <queue>
+#include <thread>
 #include <vector>
 
 using namespace std;
@@ -1067,9 +1069,32 @@ Packet Encoder::encode(std::vector<std::unique_ptr<Image>> &src_image, const Ima
 
 	configuration_.picture_configuration.temporal_refresh = false;
 
-	for (unsigned plane = 0; plane < src_image[0]->description().num_planes(); ++plane) {
+	// Process each plane in parallel. The planes are independent except for the frame-level
+	// temporal flags and the LOQ-2 step width, which the reference encoder carries in shared
+	// picture configuration: keep per-plane copies here and reconcile with the shared
+	// configuration after all planes have finished. The flags and step width only depend on
+	// the frame type and per-plane residual state, so every plane computes the same values
+	// for the common (steady-state) case.
+	//
+	const unsigned num_planes = src_image[0]->description().num_planes();
+	std::vector<std::thread> plane_threads;
+	std::mutex plane_mutex;
+	std::vector<bool> plane_temporal_refresh(num_planes);
+	std::vector<bool> plane_temporal_signalling(num_planes);
+
+	auto encode_plane = [&](unsigned plane) {
 		const bool enhancement_enabled = configuration_.picture_configuration.enhancement_enabled &&
 		                                 plane < configuration_.global_configuration.num_processed_planes;
+		// Per-plane copies of the frame-level temporal flags
+		bool temporal_refresh = configuration_.picture_configuration.temporal_refresh;
+		bool temporal_signalling_present = configuration_.picture_configuration.temporal_signalling_present;
+		auto set_temporal_flags = [&](bool refresh, bool signalling) {
+			std::lock_guard<std::mutex> lock(plane_mutex);
+			temporal_refresh = refresh;
+			temporal_signalling_present = signalling;
+			plane_temporal_refresh[plane] = refresh;
+			plane_temporal_signalling[plane] = signalling;
+		};
 
 		//// Convert between base and enhancement bit depth
 		Surface base_image;
@@ -1288,29 +1313,33 @@ Packet Encoder::encode(std::vector<std::unique_ptr<Image>> &src_image, const Ima
 				static_areas_map.dump(format("enc_static_areas_map_P%1d", plane));
 			}
 
-			if (!configuration_.picture_configuration.temporal_signalling_present &&
+			if (!temporal_signalling_present &&
 			    (!configuration_.global_configuration.temporal_enabled || previous_residuals_[plane].empty() ||
 			     frame_type == BaseFrame_Intra || frame_type == BaseFrame_IDR)) {
 				//// No Temporal
 				//
-				configuration_.picture_configuration.temporal_refresh = true;
-				configuration_.picture_configuration.temporal_signalling_present = false;
+				set_temporal_flags(true, false);
 
-				if (frame_type == BaseFrame_IDR || frame_type == BaseFrame_Intra)
+				if (frame_type == BaseFrame_IDR || frame_type == BaseFrame_Intra) {
+					std::lock_guard<std::mutex> lock(plane_mutex);
 					last_idr_frame_num = gop_frame_num;
+				}
 				if ((frame_type == BaseFrame_IDR || frame_type == BaseFrame_Intra) &&
 				    configuration_.global_configuration.temporal_enabled) {
+					std::lock_guard<std::mutex> lock(plane_mutex);
 					configuration_.picture_configuration.step_width_loq[LOQ_LEVEL_2] =
 					    clamp(configuration_.picture_configuration.step_width_loq_orig[LOQ_LEVEL_2] *
 					              encoder_configuration_.temporal_cq_sw_multiplier / 1000,
 					          (unsigned)MIN_STEP_WIDTH, (unsigned)MAX_STEP_WIDTH);
 				} else {
+					std::lock_guard<std::mutex> lock(plane_mutex);
 					configuration_.picture_configuration.step_width_loq[LOQ_LEVEL_2] =
 					    (configuration_.picture_configuration.step_width_loq_orig[LOQ_LEVEL_2]);
 				}
 
 #if defined DELTA_SW
 				if (!(frame_type == BaseFrame_Intra || frame_type == BaseFrame_IDR)) {
+					std::lock_guard<std::mutex> lock(plane_mutex);
 					if ((gop_frame_num - last_idr_frame_num) % 8 == 0) {
 						configuration_.picture_configuration.step_width_loq[LOQ_LEVEL_2] =
 						    clamp(configuration_.picture_configuration.step_width_loq_orig[LOQ_LEVEL_2] *
@@ -1395,24 +1424,28 @@ Packet Encoder::encode(std::vector<std::unique_ptr<Image>> &src_image, const Ima
 			} else {
 				//// Temporal
 				//
-				configuration_.picture_configuration.temporal_refresh = false;
-				configuration_.picture_configuration.temporal_signalling_present = true;
+				set_temporal_flags(false, true);
 
-				if (frame_type == BaseFrame_IDR || frame_type == BaseFrame_Intra)
+				if (frame_type == BaseFrame_IDR || frame_type == BaseFrame_Intra) {
+					std::lock_guard<std::mutex> lock(plane_mutex);
 					last_idr_frame_num = gop_frame_num;
+				}
 				if ((frame_type == BaseFrame_IDR || frame_type == BaseFrame_Intra) &&
 				    configuration_.global_configuration.temporal_enabled) {
+					std::lock_guard<std::mutex> lock(plane_mutex);
 					configuration_.picture_configuration.step_width_loq[LOQ_LEVEL_2] =
 					    clamp(configuration_.picture_configuration.step_width_loq_orig[LOQ_LEVEL_2] *
 					              encoder_configuration_.temporal_cq_sw_multiplier / 1000,
 					          (unsigned)MIN_STEP_WIDTH, (unsigned)MAX_STEP_WIDTH);
 				} else {
+					std::lock_guard<std::mutex> lock(plane_mutex);
 					configuration_.picture_configuration.step_width_loq[LOQ_LEVEL_2] =
 					    (configuration_.picture_configuration.step_width_loq_orig[LOQ_LEVEL_2]);
 				}
 
 #if defined DELTA_SW
 				if (!(frame_type == BaseFrame_Intra || frame_type == BaseFrame_IDR)) {
+					std::lock_guard<std::mutex> lock(plane_mutex);
 					if ((gop_frame_num - last_idr_frame_num) % 8 == 0) {
 						configuration_.picture_configuration.step_width_loq[LOQ_LEVEL_2] =
 						    clamp(configuration_.picture_configuration.step_width_loq_orig[LOQ_LEVEL_2] *
@@ -1600,21 +1633,20 @@ Packet Encoder::encode(std::vector<std::unique_ptr<Image>> &src_image, const Ima
 				full_reco[plane] = Add().process(enhanced_prediction, previous_residuals_[plane]);
 
 				// Optional temporal plane - goes in to 'extra' layer following residual layers
-				if (!configuration_.picture_configuration.temporal_refresh)
+				if (!temporal_refresh)
 					symbols[plane][LOQ_LEVEL_2][num_residual_layers()] = temporal_mask;
 			}
 		} else if (plane < configuration_.global_configuration.num_processed_planes) {
-			configuration_.picture_configuration.temporal_signalling_present = encoder_configuration_.no_enhancement_temporal_layer;
+			temporal_signalling_present = encoder_configuration_.no_enhancement_temporal_layer;
 			if (!configuration_.global_configuration.temporal_enabled || previous_residuals_[plane].empty() ||
 			    frame_type == BaseFrame_Intra || frame_type == BaseFrame_IDR) {
 				// No Temporal & no enhancement, just pass prediction through
-				configuration_.picture_configuration.temporal_refresh = true;
-				configuration_.picture_configuration.temporal_signalling_present = false;
+				set_temporal_flags(true, false);
 				previous_residuals_[plane] = Surface();
 				full_reco[plane] = enhanced_prediction;
-			} else if (configuration_.picture_configuration.temporal_signalling_present) {
+			} else if (temporal_signalling_present) {
 				// No Enhancement but temporal can still be added
-				configuration_.picture_configuration.temporal_refresh = false;
+				set_temporal_flags(false, temporal_signalling_present);
 				Surface intra_cost = TemporalCost_SAD().process(src, enhanced_prediction, transform_block_size());
 				const Surface inter_recon = Add().process(enhanced_prediction, previous_residuals_[plane]);
 				Surface inter_cost = TemporalCost_SAD().process(src, inter_recon, transform_block_size());
@@ -1646,7 +1678,7 @@ Packet Encoder::encode(std::vector<std::unique_ptr<Image>> &src_image, const Ima
 				// Temporal plane - goes in to 'extra' layer
 				symbols[plane][LOQ_LEVEL_2][num_residual_layers()] = temporal_mask;
 			} else {
-				configuration_.picture_configuration.temporal_refresh = false;
+				set_temporal_flags(false, temporal_signalling_present);
 				full_reco[plane] = Add().process(enhanced_prediction, previous_residuals_[plane]);
 			}
 		} else {
@@ -1662,7 +1694,17 @@ Packet Encoder::encode(std::vector<std::unique_ptr<Image>> &src_image, const Ima
 			}
 		} else
 			outp_reco[plane] = full_reco[plane];
-	}
+	};
+
+	for (unsigned plane = 0; plane < num_planes; ++plane)
+		plane_threads.emplace_back(encode_plane, plane);
+	for (auto &t : plane_threads)
+		t.join();
+
+	// Reconcile the frame-level temporal flags with the shared picture configuration - all
+	// planes compute the same values in the common case, plane 0 wins ties
+	configuration_.picture_configuration.temporal_refresh = plane_temporal_refresh[0];
+	configuration_.picture_configuration.temporal_signalling_present = plane_temporal_signalling[0];
 
 	if (Surface::get_dump_surfaces())
 		base_reco[0].dump_yuv("enc_base_reco", base_reco, base_image_description_, true);
