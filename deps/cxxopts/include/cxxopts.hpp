@@ -26,14 +26,17 @@ THE SOFTWARE.
 #define CXXOPTS_HPP_INCLUDED
 
 #include <cctype>
+#include <cstdint>
 #include <cstring>
 #include <exception>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <regex>
 #include <sstream>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>

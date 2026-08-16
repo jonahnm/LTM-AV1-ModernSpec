@@ -36,6 +36,7 @@
 // SurfaceImpl.hpp
 //
 #pragma once
+#include <cstdint>
 
 // Template definitions for SurfaceBuilder<T> amd SurfaceView<T>
 

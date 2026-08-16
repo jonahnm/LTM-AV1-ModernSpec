@@ -37,6 +37,7 @@
 // Dithering.hpp
 //
 #pragma once
+#include <cstdint>
 
 #include "Component.hpp"
 #include "Surface.hpp"

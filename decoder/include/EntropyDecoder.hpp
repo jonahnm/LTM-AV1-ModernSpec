@@ -36,6 +36,7 @@
 //// EntropyDecoder.hpp
 //
 #pragma once
+#include <cstdint>
 
 #include <utility>
 

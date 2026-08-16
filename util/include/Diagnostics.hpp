@@ -38,6 +38,7 @@
 // Various error checking and logging mechanisms
 //
 #pragma once
+#include <cstdint>
 
 #include <cstdio>
 #include <string>

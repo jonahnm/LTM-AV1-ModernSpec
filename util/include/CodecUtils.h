@@ -36,6 +36,7 @@
 // Support utils for codecs
 //
 #pragma once
+#include <stdint.h>
 
 #include "CodecApi.h"
 

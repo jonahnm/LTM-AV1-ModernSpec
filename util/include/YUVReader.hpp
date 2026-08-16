@@ -36,6 +36,7 @@
 // YUReader.hpp
 //
 #pragma once
+#include <cstdint>
 
 #include "Image.hpp"
 #include "Misc.hpp"

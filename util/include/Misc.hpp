@@ -36,6 +36,7 @@
 // Misc.hpp
 //
 #pragma once
+#include <cstdint>
 
 #include <algorithm>
 #include <memory>

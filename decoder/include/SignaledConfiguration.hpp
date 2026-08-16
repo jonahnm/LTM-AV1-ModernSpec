@@ -37,6 +37,7 @@
 // SignaledConfiguration.hpp
 //
 #pragma once
+#include <cstdint>
 
 #include "Config.hpp"
 #include "Image.hpp"

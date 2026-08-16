@@ -38,6 +38,7 @@
 // A 2D array of pixels
 //
 #pragma once
+#include <cstdint>
 
 #include "Buffer.hpp"
 #include "Diagnostics.hpp"

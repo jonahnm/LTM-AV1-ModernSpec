@@ -40,6 +40,7 @@
 //
 
 #pragma once
+#include <cstdint>
 
 #include "Dimensions.hpp"
 #include "Dithering.hpp"
