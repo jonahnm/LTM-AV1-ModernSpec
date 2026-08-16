@@ -250,6 +250,24 @@ void FileEncoderImpl::encode_file(const string &src_filename, const string &dst_
 	// Read source and downsample into base
 	//
 	unique_ptr<YUVReader> src_file(CHECK(CreateYUVReader(src_filename, encoder_.src_image_description(), fps_)));
+
+	// A pipe/FIFO source can only be read once, but the enhancement pass needs to re-read the
+	// source. Spool a sequential source to a temporary regular file up front so the rest of the
+	// pipeline can use random access as with a regular input.
+	//
+	string src_spool_filename;
+	if (src_file->sequential()) {
+		src_spool_filename = make_temporary_filename("_src_spool.yuv");
+		INFO("Spooling non-seekable source to %s", src_spool_filename.c_str());
+		const unsigned frames = min(src_file->length(), limit);
+		{
+			unique_ptr<YUVWriter> spool(CHECK(CreateYUVWriter(src_spool_filename, src_file->description(), true)));
+			for (unsigned f = 0; f < frames; ++f)
+				spool->write(src_file->read(f, f));
+		}
+		src_file = CHECK(CreateYUVReader(src_spool_filename, src_file->description(), fps_));
+	}
+
 	initialize_encoder(*src_file, limit);
 
 	int64_t pts = 0;
@@ -339,6 +357,8 @@ void FileEncoderImpl::encode_file(const string &src_filename, const string &dst_
 		::remove(base_bin_filename.c_str());
 		::remove(base_recon_filename.c_str());
 	}
+	if (!src_spool_filename.empty())
+		::remove(src_spool_filename.c_str());
 }
 
 void FileEncoderImpl::encode_file_with_decoder(const string &src_filename, const string base_filename, const string &dst_filename,

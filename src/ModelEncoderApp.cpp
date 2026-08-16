@@ -397,6 +397,52 @@ int main(int argc, char *argv[]) {
 		if (options.count("quant_reduced_deadzone"))
 			pb.set("quant_reduced_deadzone", options["quant_reduced_deadzone"].as<unsigned>());
 
+	// If the input is a YUV4MPEG2 file, use the header for geometry, format and frame rate
+	// unless those were given explicitly on the command line
+	//
+	{
+		const std::string probe_file = options.count("input_file") ? options["input_file"].as<std::string>()
+		                                                          : std::string("source.yuv");
+		unsigned header_width = 0, header_height = 0;
+		ImageFormat header_format = IMAGE_FORMAT_NONE;
+		float header_rate = 0.0f;
+		if (ProbeYUV4MPEG2File(probe_file, &header_width, &header_height, &header_format, &header_rate)) {
+			auto format_name = [](ImageFormat format) {
+				switch (format) {
+				case IMAGE_FORMAT_YUV420P8: return "yuv420p";
+				case IMAGE_FORMAT_YUV420P10: return "yuv420p10";
+				case IMAGE_FORMAT_YUV420P12: return "yuv420p12";
+				case IMAGE_FORMAT_YUV420P14: return "yuv420p14";
+				case IMAGE_FORMAT_YUV422P8: return "yuv422p";
+				case IMAGE_FORMAT_YUV422P10: return "yuv422p10";
+				case IMAGE_FORMAT_YUV422P12: return "yuv422p12";
+				case IMAGE_FORMAT_YUV422P14: return "yuv422p14";
+				case IMAGE_FORMAT_YUV444P8: return "yuv444p";
+				case IMAGE_FORMAT_YUV444P10: return "yuv444p10";
+				case IMAGE_FORMAT_YUV444P12: return "yuv444p12";
+				case IMAGE_FORMAT_YUV444P14: return "yuv444p14";
+				case IMAGE_FORMAT_Y8: return "y";
+				case IMAGE_FORMAT_Y10: return "y10";
+				case IMAGE_FORMAT_Y12: return "y12";
+				case IMAGE_FORMAT_Y14: return "y14";
+				default: return "yuv420p";
+				}
+			};
+
+			INFO("YUV4MPEG2 input detected: %ux%u, %s, %.3f fps", header_width, header_height, format_name(header_format),
+			     header_rate);
+
+			if (!options.count("width"))
+				pb.set("width", header_width);
+			if (!options.count("height"))
+				pb.set("height", header_height);
+			if (!options.count("format"))
+				pb.set("format", std::string(format_name(header_format)));
+			if (!options.count("fps"))
+				pb.set("fps", (unsigned)(header_rate + 0.5f));
+		}
+	}
+
 	} catch (const cxxopts::OptionException &e) {
 		std::cout << "error parsing options: " << e.what() << std::endl;
 		exit(1);

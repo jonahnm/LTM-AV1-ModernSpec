@@ -41,10 +41,18 @@
 #include "YUVReader.hpp"
 
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <regex>
+#include <sstream>
 #include <string>
+
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#endif
 
 #include "Diagnostics.hpp"
 #include "Image.hpp"
@@ -54,6 +62,11 @@
 namespace lctm {
 
 using namespace std;
+
+// YUV4MPEG2 details - "YUV4MPEG2" magic, "FRAME" frame markers, and a sane header cap
+static const unsigned kYUV4MPEG2_MAGIC_LEN = 9;
+static const unsigned kYUV4MPEG2_FRAME_MARKER_LEN = 6;
+static const unsigned kYUV4MPEG2_MAX_HEADER = 4096;
 
 YUVReader::YUVReader(const std::string &name, float rate, FILE *file, uintmax_t fileSize)
     : name_(name), length_(0), rate_(rate), file_(file), fileSize_(fileSize) {}
@@ -65,7 +78,7 @@ YUVReader::YUVReader(const std::string &name, const ImageDescription &image_desc
 YUVReader::YUVReader(const std::string &name, const ImageDescription &image_description, unsigned length, float rate,
                      FILE *stream)
     : name_(name), fileSize_(static_cast<uintmax_t>(-1)), image_description_(image_description), length_(length), rate_(rate),
-      stream_(stream) {
+      sequential_(true), position_(0), stream_(stream) {
 
 	CHECK(stream_ != nullptr);
 }
@@ -94,35 +107,67 @@ void YUVReader::update_data(const ImageDescription &image_description) {
 void YUVReader::set_position(unsigned position) const {
 	CHECK(position < length_);
 
-	if (stream_) {
+	if (sequential_) {
 		// Streams can only be read sequentially
 		CHECK(position == position_);
 		position_ = position + 1;
 	} else {
+		uint64_t offset;
+		if (y4m_)
+			// Skip the header, each prior frame's payload and its "FRAME" marker, and the marker of this frame
+			offset = y4m_header_size_ + (uint64_t)position * (uint64_t)(image_description_.byte_size() + kYUV4MPEG2_FRAME_MARKER_LEN) + kYUV4MPEG2_FRAME_MARKER_LEN;
+		else
+			offset = (uint64_t)position * (uint64_t)image_description_.byte_size();
+
 		if (position != position_)
-			CHECK(fseeko(file_.get(), (uint64_t)position * (uint64_t)image_description_.byte_size(), SEEK_SET) == 0);
+			CHECK(fseeko(file_.get(), offset, SEEK_SET) == 0);
 		position_ = position;
 	}
+}
+
+// Read bytes from the input, replaying any bytes consumed during format sniffing first (this
+// only ever applies to the start of frame 0 on a non-seekable pipe)
+//
+void YUVReader::read_bytes(void *buf, size_t len) const {
+	FILE *f = input_stream();
+	size_t off = 0;
+
+	if (!y4m_pending_.empty()) {
+		const size_t c = std::min(len, y4m_pending_.size());
+		memcpy(buf, y4m_pending_.data(), c);
+		y4m_pending_.erase(0, c);
+		off = c;
+	}
+
+	if (off < len && fread((char *)buf + off, len - off, 1, f) != 1)
+		ERR("Cannot read YUV file");
 }
 
 // Get image from frame position
 Image YUVReader::read(unsigned position, uint64_t timestamp) const {
 	set_position(position);
 
-	std::vector<Surface> surfaces;
 	FILE *f = input_stream();
+	if (y4m_ && sequential_) {
+		// Consume the "FRAME" marker (short line, terminated by \n)
+		char c = 0;
+		while (c != '\n') {
+			if (fread(&c, 1, 1, f) != 1)
+				ERR("Cannot read YUV4MPEG2 stream");
+		}
+	}
+
+	std::vector<Surface> surfaces;
 
 	for (unsigned p = 0; p < image_description_.num_planes(); ++p) {
 		auto b = Surface::build_from<int8_t>();
 		b.reserve_bpp(image_description_.width(p), image_description_.height(p), image_description_.byte_depth(),
 		              image_description_.row_stride(p));
 		if (image_description_.rows_are_contiguous(p)) {
-			if (fread(b.data(), image_description_.plane_size(p), 1, f) != 1)
-				ERR("Cannot read YUV file");
+			read_bytes(b.data(), image_description_.plane_size(p));
 		} else {
 			for (unsigned y = 0; y < image_description_.height(p); ++y) {
-				if (fread(b.data(0, y), image_description_.row_size(p), 1, f) != 1)
-					ERR("Cannot read YUV file");
+				read_bytes(b.data(0, y), image_description_.row_size(p));
 			}
 		}
 		surfaces.push_back(b.finish());
@@ -210,25 +255,248 @@ static ImageDescription ParseYUVFilename(const string &name, float *pRate) {
 
 // Open file for reading, given explicit format
 //
+static bool ParseYUV4MPEG2HeaderLine(const std::string &line, unsigned *width, unsigned *height, ImageFormat *format,
+                                     unsigned *fps_num, unsigned *fps_den);
+static ImageFormat YUV4MPEG2ChromaFormat(const std::string &value);
+
 std::unique_ptr<YUVReader> CreateYUVReader(const std::string &name, const ImageDescription &description, unsigned rate) {
-	// Is file there?
-	const uintmax_t fileSize = file_size(name);
-	if (fileSize == static_cast<uintmax_t>(-1))
-		return 0;
-
-	// Figure length
-	unsigned length = static_cast<unsigned>(fileSize / description.byte_size());
-
-	if (length == 0)
-		ERR("YUV file is too small");
-
+	// Open the file (for a FIFO this blocks until a writer connects)
+	//
 	UniquePtrFile yuvFile(std::fopen(name.c_str(), "rb"));
+	if (!yuvFile)
+		ERR("Cannot open YUV file");
 
-	if (yuvFile)
-		return unique_ptr<YUVReader>(new YUVReader(name, description, length, (float)rate, yuvFile.release(), fileSize));
+	// Can we seek? Only regular files - pipes and FIFOs are sequential
+	//
+	bool regular = true;
+	uintmax_t fileSize = 0;
+#if !defined(_WIN32)
+	struct stat st = {};
+	if (fstat(fileno(yuvFile.get()), &st) == 0) {
+		regular = S_ISREG(st.st_mode);
+		fileSize = (uintmax_t)st.st_size;
+	}
+#else
+	fileSize = file_size(name);
+#endif
 
-	ERR("Cannot open YUV file");
-	return 0;
+	// Sniff for a YUV4MPEG2 header - consume a few bytes up front and replay them as part of
+	// the first frame if the input turns out not to be y4m (needed for non-seekable inputs)
+	//
+	bool y4m = false;
+	unsigned header_width = 0, header_height = 0;
+	unsigned header_fps_num = 0, header_fps_den = 0;
+	ImageFormat header_format = IMAGE_FORMAT_NONE;
+	uint64_t header_size = 0;
+	std::string pending;
+
+	{
+		char magic[kYUV4MPEG2_MAGIC_LEN] = {};
+		const size_t got = fread(magic, 1, sizeof(magic), yuvFile.get());
+		pending.assign(magic, got);
+
+		if (got == kYUV4MPEG2_MAGIC_LEN && memcmp(magic, "YUV4MPEG2", kYUV4MPEG2_MAGIC_LEN) == 0) {
+			// Read the rest of the header line
+			char c = 0;
+			while (pending.size() < kYUV4MPEG2_MAX_HEADER && pending.back() != '\n') {
+				if (fread(&c, 1, 1, yuvFile.get()) != 1)
+					break;
+				pending += c;
+			}
+			if (pending.back() == '\n' &&
+			    ParseYUV4MPEG2HeaderLine(pending, &header_width, &header_height, &header_format, &header_fps_num, &header_fps_den)) {
+				y4m = true;
+				header_size = pending.size();
+				// The header is not part of the frame data - discard it (frame markers are
+				// consumed by read()); only raw-stream sniff bytes are replayed
+				pending.clear();
+			}
+		}
+	}
+
+	unsigned length = 0;
+	float frame_rate = (float)rate;
+
+	if (y4m) {
+		const uintmax_t frame_stride = ImageDescription(header_format, header_width, header_height).byte_size() +
+		                               kYUV4MPEG2_FRAME_MARKER_LEN;
+		if (regular && fileSize > header_size)
+			length = (unsigned)((fileSize - header_size) / frame_stride);
+		else
+			length = (unsigned)std::numeric_limits<unsigned>::max();
+
+		if (length == 0)
+			ERR("YUV file is too small");
+
+		frame_rate = header_fps_den ? (float)header_fps_num / (float)header_fps_den : frame_rate;
+	} else if (regular) {
+		// Rewind - nothing was consumed
+		CHECK(fseeko(yuvFile.get(), 0, SEEK_SET) == 0);
+		pending.clear();
+
+		length = (unsigned)(fileSize / description.byte_size());
+		if (length == 0)
+			ERR("YUV file is too small");
+	} else {
+		// Non-seekable raw stream (pipe/FIFO): length unknown, play back the sniffed bytes
+		length = (unsigned)std::numeric_limits<unsigned>::max();
+	}
+
+	unique_ptr<YUVReader> reader(
+	    new YUVReader(name, description, length, frame_rate, yuvFile.release(), regular ? fileSize : (uintmax_t)-1));
+
+	reader->sequential_ = !regular;
+	if (!regular)
+		reader->position_ = 0;
+	reader->y4m_ = y4m;
+	reader->y4m_header_size_ = header_size;
+	reader->y4m_pending_ = pending;
+	if (y4m)
+		reader->image_description_ = ImageDescription(header_format, header_width, header_height);
+
+	return reader;
+}
+
+// Probe a regular file for a YUV4MPEG2 header and report its geometry, format and frame rate
+//
+bool ProbeYUV4MPEG2File(const std::string &name, unsigned *width, unsigned *height, ImageFormat *format, float *rate) {
+#if !defined(_WIN32)
+	// Only seekable regular files can be probed safely
+	struct stat st = {};
+	if (stat(name.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
+		return false;
+#endif
+	UniquePtrFile f(std::fopen(name.c_str(), "rb"));
+	if (!f)
+		return false;
+
+	char magic[kYUV4MPEG2_MAGIC_LEN] = {};
+	if (fread(magic, 1, sizeof(magic), f.get()) != kYUV4MPEG2_MAGIC_LEN ||
+	    memcmp(magic, "YUV4MPEG2", kYUV4MPEG2_MAGIC_LEN) != 0)
+		return false;
+
+	std::string line(magic, kYUV4MPEG2_MAGIC_LEN);
+	char c = 0;
+	while (line.size() < kYUV4MPEG2_MAX_HEADER && line.back() != '\n') {
+		if (fread(&c, 1, 1, f.get()) != 1)
+			return false;
+		line += c;
+	}
+	if (line.back() != '\n')
+		return false;
+
+	unsigned fps_num = 0, fps_den = 0;
+	if (!ParseYUV4MPEG2HeaderLine(line, width, height, format, &fps_num, &fps_den))
+		return false;
+
+	if (rate)
+		*rate = fps_den ? (float)fps_num / (float)fps_den : 0.0f;
+
+	return true;
+}
+
+// Parse a YUV4MPEG2 header line - e.g. "YUV4MPEG2 W3840 H2160 F25:1 Ip A1:1 C420mpeg2\n"
+//
+// The interlace flag, aspect ratio and extensions are ignored - the model expects progressive
+// frames in the signalled colour space.
+//
+bool ParseYUV4MPEG2HeaderLine(const std::string &line, unsigned *width, unsigned *height, ImageFormat *format,
+                              unsigned *fps_num, unsigned *fps_den) {
+	unsigned w = 0, h = 0, fn = 25, fd = 1;
+	ImageFormat fmt = IMAGE_FORMAT_NONE;
+
+	std::istringstream iss(line);
+	std::string token;
+	while (iss >> token) {
+		if (token.size() < 2)
+			continue;
+		switch (token[0]) {
+		case 'W':
+			w = (unsigned)strtoul(token.c_str() + 1, nullptr, 10);
+			break;
+		case 'H':
+			h = (unsigned)strtoul(token.c_str() + 1, nullptr, 10);
+			break;
+		case 'F': {
+			const unsigned n = (unsigned)strtoul(token.c_str() + 1, nullptr, 10);
+			const char *sep = strchr(token.c_str() + 1, ':');
+			const unsigned d = sep ? (unsigned)strtoul(sep + 1, nullptr, 10) : 1;
+			if (n && d) {
+				fn = n;
+				fd = d;
+			}
+			break;
+		}
+		case 'C':
+			fmt = YUV4MPEG2ChromaFormat(token.substr(1));
+			break;
+		default:
+			// I (interlace), A (aspect), X (extensions) - ignored
+			break;
+		}
+	}
+
+	if (!w || !h)
+		return false;
+
+	if (fmt == IMAGE_FORMAT_NONE)
+		fmt = IMAGE_FORMAT_YUV420P8;
+
+	if (width)
+		*width = w;
+	if (height)
+		*height = h;
+	if (format)
+		*format = fmt;
+	if (fps_num)
+		*fps_num = fn;
+	if (fps_den)
+		*fps_den = fd;
+	return true;
+}
+
+// Map a YUV4MPEG2 chroma parameter (e.g. "420mpeg2", "420p10", "422p12", "444p14", "mono10")
+// to an ImageFormat
+//
+ImageFormat YUV4MPEG2ChromaFormat(const std::string &value) {
+	const std::string s = lowercase(value);
+
+	unsigned depth = 8;
+	if (s.find("p16") != std::string::npos)
+		depth = 16;
+	else if (s.find("p14") != std::string::npos)
+		depth = 14;
+	else if (s.find("p12") != std::string::npos)
+		depth = 12;
+	else if (s.find("p10") != std::string::npos)
+		depth = 10;
+
+	unsigned subsampling = 0; // 0 = 420, 1 = 422, 2 = 444, 3 = mono
+	if (s.compare(0, 4, "mono") == 0)
+		subsampling = 3;
+	else if (s.size() >= 3 && s[0] == '4' && s[1] == '4')
+		subsampling = 2;
+	else if (s.size() >= 3 && s[0] == '4' && s[2] == '2')
+		subsampling = 1;
+
+	switch (subsampling) {
+	case 1:
+		return depth == 10 ? IMAGE_FORMAT_YUV422P10 : depth == 12 ? IMAGE_FORMAT_YUV422P12 : depth == 14 ? IMAGE_FORMAT_YUV422P14
+		                                                                      : depth == 16 ? IMAGE_FORMAT_YUV422P16
+		                                                                                    : IMAGE_FORMAT_YUV422P8;
+	case 2:
+		return depth == 10 ? IMAGE_FORMAT_YUV444P10 : depth == 12 ? IMAGE_FORMAT_YUV444P12 : depth == 14 ? IMAGE_FORMAT_YUV444P14
+		                                                                      : depth == 16 ? IMAGE_FORMAT_YUV444P16
+		                                                                                    : IMAGE_FORMAT_YUV444P8;
+	case 3:
+		return depth == 10 ? IMAGE_FORMAT_Y10 : depth == 12 ? IMAGE_FORMAT_Y12 : depth == 14 ? IMAGE_FORMAT_Y14
+		                                                       : depth == 16 ? IMAGE_FORMAT_Y16
+		                                                                     : IMAGE_FORMAT_Y8;
+	default:
+		return depth == 10 ? IMAGE_FORMAT_YUV420P10 : depth == 12 ? IMAGE_FORMAT_YUV420P12 : depth == 14 ? IMAGE_FORMAT_YUV420P14
+		                                                                      : depth == 16 ? IMAGE_FORMAT_YUV420P16
+		                                                                                    : IMAGE_FORMAT_YUV420P8;
+	}
 }
 
 // Open file for reading, format is inferred from filename
