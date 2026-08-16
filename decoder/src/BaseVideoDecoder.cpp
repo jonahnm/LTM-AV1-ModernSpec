@@ -84,6 +84,22 @@ using namespace vnova::utility;
 
 namespace lctm {
 
+// Resolve the path to an external codec executable - prefer the copy in the external_codecs
+// directory (next to the test model executable), otherwise fall back to the name on PATH.
+//
+static string codec_executable(const string &name) {
+	const string local = get_program_directory(format("external_codecs/%s", name.c_str()));
+	if (FILE *f = fopen(local.c_str(), "r")) {
+		fclose(f);
+		return local;
+	}
+	// Fall back to the executable name on PATH
+	const size_t slash = name.find_last_of("/\\");
+	if (slash != string::npos)
+		return name.substr(slash + 1);
+	return name;
+}
+
 namespace {
 
 #define QUEUE_LIMIT 32
@@ -560,6 +576,31 @@ public:
 	virtual void StatisticsComputation() override{};
 };
 
+// AV1 Base Codec
+//
+class BaseVideoDecoderExternalAV1 : public BaseVideoDecoderExternal {
+public:
+	BaseVideoDecoderExternalAV1(BaseVideoDecoder::Output &output, Encapsulation encapsulation, const std::string &yuv_file,
+	                            bool keep_base)
+	    : BaseVideoDecoderExternal(output, encapsulation, yuv_file, keep_base) {}
+
+	BaseCoding base_coding() const override { return BaseCoding_AV1; };
+
+	bool run_decoder(const string &es_file, const string &yuv_file) const override {
+		string p = codec_executable("dav1d/dav1d");
+		if (getenv("LCEVC_DAV1D"))
+			p = getenv("LCEVC_DAV1D");
+
+		INFO("Using base decoder %s", p.c_str());
+
+		int r = system(format("%s -i %s -o %s --muxer yuv -q", p.c_str(), es_file.c_str(), yuv_file.c_str()).c_str());
+
+		return r == 0;
+	}
+
+	virtual void StatisticsComputation() override{};
+};
+
 // Factory function
 //
 unique_ptr<BaseVideoDecoder> CreateBaseVideoDecoder(BaseVideoDecoder::Output &output, BaseCoding base, Encapsulation encapsulation,
@@ -567,19 +608,21 @@ unique_ptr<BaseVideoDecoder> CreateBaseVideoDecoder(BaseVideoDecoder::Output &ou
 
 	try {
 		if (external || keep_base || !yuv_file.empty()) {
-			if (base == BaseCoding_AVC)
-				return unique_ptr<BaseVideoDecoder>(new BaseVideoDecoderExternalAVC(output, encapsulation, yuv_file, keep_base));
-			else if (base == BaseCoding_HEVC)
-				return unique_ptr<BaseVideoDecoder>(new BaseVideoDecoderExternalHEVC(output, encapsulation, yuv_file, keep_base));
-			else if (base == BaseCoding_VVC)
-				return unique_ptr<BaseVideoDecoder>(new BaseVideoDecoderExternalVVC(output, encapsulation, yuv_file, keep_base));
-			else if (base == BaseCoding_EVC)
-				return unique_ptr<BaseVideoDecoder>(new BaseVideoDecoderExternalEVC(output, encapsulation, yuv_file, keep_base));
-			else if (base == BaseCoding_YUV)
-				return unique_ptr<BaseVideoDecoder>(new BaseVideoDecoderExternalYUV(output, encapsulation, yuv_file, keep_base));
-			else
-				ERR("Unknown base");
-		} else {
+		if (base == BaseCoding_AVC)
+			return unique_ptr<BaseVideoDecoder>(new BaseVideoDecoderExternalAVC(output, encapsulation, yuv_file, keep_base));
+		else if (base == BaseCoding_HEVC)
+			return unique_ptr<BaseVideoDecoder>(new BaseVideoDecoderExternalHEVC(output, encapsulation, yuv_file, keep_base));
+		else if (base == BaseCoding_VVC)
+			return unique_ptr<BaseVideoDecoder>(new BaseVideoDecoderExternalVVC(output, encapsulation, yuv_file, keep_base));
+		else if (base == BaseCoding_EVC)
+			return unique_ptr<BaseVideoDecoder>(new BaseVideoDecoderExternalEVC(output, encapsulation, yuv_file, keep_base));
+		else if (base == BaseCoding_AV1)
+			return unique_ptr<BaseVideoDecoder>(new BaseVideoDecoderExternalAV1(output, encapsulation, yuv_file, keep_base));
+		else if (base == BaseCoding_YUV)
+			return unique_ptr<BaseVideoDecoder>(new BaseVideoDecoderExternalYUV(output, encapsulation, yuv_file, keep_base));
+		else
+			ERR("Unknown base");
+	} else {
 			if (base == BaseCoding_AVC) {
 #if defined(LTM_ENABLE_CODECAPI_AVC)
 				return CreateBaseVideoDecoderCodecApi(output, encapsulation, base, "avc","","");
@@ -604,6 +647,8 @@ unique_ptr<BaseVideoDecoder> CreateBaseVideoDecoder(BaseVideoDecoder::Output &ou
 #else
 				return unique_ptr<BaseVideoDecoder>(new BaseVideoDecoderExternalEVC(output, encapsulation, yuv_file, keep_base));
 #endif
+			} else if (base == BaseCoding_AV1) {
+				return unique_ptr<BaseVideoDecoder>(new BaseVideoDecoderExternalAV1(output, encapsulation, yuv_file, keep_base));
 			} else {
 				ERR("Unknown base");
 			}

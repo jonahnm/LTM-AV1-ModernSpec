@@ -93,6 +93,9 @@ Parameters parameter_defaults_global(const Parameters &p) {
 		else if (lowercase(p["base_encoder"].get<std::string>()).compare("x265") == 0 ||
 		         lowercase(p["base_encoder"].get<std::string>()).compare("baseyuv_x265") == 0)
 			base_codec = BaseCoding_EVC;
+		else if (lowercase(p["base_encoder"].get<std::string>()).compare("av1") == 0 ||
+		         lowercase(p["base_encoder"].get<std::string>()).compare("baseyuv_av1") == 0)
+			base_codec = BaseCoding_AV1;
 
 		// Base qp
 		if (p["qp"].empty()) {
@@ -116,6 +119,11 @@ Parameters parameter_defaults_global(const Parameters &p) {
 					base_qp = (int)((0.012f * (float)(step_width_2)) - 15.5f);
 				else
 					base_qp = (int)((0.0148f * (float)(step_width_2)) - 22.07f);
+			} else if (base_codec == BaseCoding_AV1) {
+				if ((resolution <= ((10000 * 1920) + (1080))))
+					base_qp = (int)((0.012f * (float)(step_width_2)) - 15.5f);
+				else
+					base_qp = (int)((0.0148f * (float)(step_width_2)) - 21.751f);
 			}
 			base_qp = clamp(base_qp, (unsigned)MIN_BASE_QP, (unsigned)MAX_BASE_QP);
 		}
@@ -167,6 +175,9 @@ Parameters parameter_defaults_picture(const Parameters &p, std::vector<std::uniq
 		else if (lowercase(p["base_encoder"].get<std::string>()).compare("evc") == 0 ||
 		         lowercase(p["base_encoder"].get<std::string>()).compare("baseyuv_evc") == 0)
 			base_codec = BaseCoding_EVC;
+		else if (lowercase(p["base_encoder"].get<std::string>()).compare("av1") == 0 ||
+		         lowercase(p["base_encoder"].get<std::string>()).compare("baseyuv_av1") == 0)
+			base_codec = BaseCoding_AV1;
 
 		// encoding_transform_type
 		if (p["encoding_transform_type"].empty()) {

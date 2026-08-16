@@ -128,6 +128,10 @@ ESFile::Result ESFile::ReadAccessUnit(AccessUnit &out) {
 
 	case NALDelimiterU32Length:
 		return ReadAccessUnitU32Length(out);
+
+	case NALDelimiterOBU:
+		return ReadAccessUnitOBU(out);
+
 	default:
 		CHECK(0);
 		return NoFile;
@@ -268,6 +272,114 @@ ESFile::Result ESFile::ReadAccessUnitU32Length(AccessUnit &out) {
 		} else {
 			return NalParsingError;
 		}
+	}
+}
+
+// Read an access unit from a low overhead OBU stream (AV1). Each OBU is framed as:
+//   obu_header, [obu_extension_header], leb128(obu_size), obu_payload
+// An access unit is terminated by the next temporal delimiter OBU (which itself belongs to the
+// following access unit).
+//
+ESFile::Result ESFile::ReadAccessUnitOBU(AccessUnit &out) {
+	if (m_file == nullptr)
+		return NoFile;
+
+	utility::DataBuffer buffer;
+	std::vector<NalUnit> nalUnits;
+	int32_t size = 0;
+	bool seen_frame = false;
+
+	while (true) {
+		// Remember start of this OBU so we can rewind on an access unit boundary
+		const long obu_start = ftell(m_file);
+
+		// Read OBU header byte
+		const int c = fgetc(m_file);
+		if (c == EOF) {
+			// End of file - flush any remaining AU
+			if (!nalUnits.empty()) {
+				out.m_pictureType = m_decoder->GetBasePictureType();
+				out.m_poc = GenerateIncreasingPOC();
+				out.m_qp = m_decoder->GetQP();
+				out.m_nalUnits = std::move(nalUnits);
+				out.m_size = size;
+				return Success;
+			}
+			return EndOfFile;
+		}
+
+		const uint8_t header = (uint8_t)c;
+		if (header & 0x01)
+			return NalParsingError; // reserved bit set
+
+		buffer.push_back(header);
+
+		// OBU extension header
+		if ((header >> 2) & 0x01) {
+			const int ext = fgetc(m_file);
+			if (ext == EOF)
+				return NalParsingError;
+			buffer.push_back((uint8_t)ext);
+		}
+
+		// OBU size field (leb128)
+		uint64_t payload_size = 0;
+		if ((header >> 1) & 0x01) {
+			unsigned i = 0;
+			while (true) {
+				const int s = fgetc(m_file);
+				if (s == EOF)
+					return NalParsingError;
+				buffer.push_back((uint8_t)s);
+				payload_size |= (uint64_t)(s & 0x7f) << (7 * i);
+				++i;
+				if (!(s & 0x80) || i >= 8)
+					break;
+			}
+		} else {
+			// OBU without a size field cannot be framed - unsupported
+			return NalParsingError;
+		}
+
+		// Read OBU payload
+		for (uint64_t n = 0; n < payload_size; ++n) {
+			const int p = fgetc(m_file);
+			if (p == EOF)
+				return NalParsingError;
+			buffer.push_back((uint8_t)p);
+		}
+
+		const uint8_t obu_type = (header >> 3) & 0x0f;
+
+		// Parse the OBU to track frame boundaries and picture state
+		if (!m_decoder->ParseNalUnit(buffer.data(), (uint32_t)buffer.size()))
+			return NalParsingError;
+
+		// A temporal delimiter ends the current AU (and belongs to the next one)
+		if (obu_type == 2 && seen_frame) {
+			if (fseek(m_file, obu_start, SEEK_SET) != 0)
+				return NalParsingError;
+
+			out.m_pictureType = m_decoder->GetBasePictureType();
+			out.m_poc = GenerateIncreasingPOC();
+			out.m_qp = m_decoder->GetQP();
+			out.m_temporalId = m_decoder->GetTemporalId();
+			out.m_nalUnits = std::move(nalUnits);
+			out.m_size = size;
+			return Success;
+		}
+
+		// Frame OBUs: frame header, tile group, or whole frame
+		if (obu_type == 3 || obu_type == 4 || obu_type == 6)
+			seen_frame = true;
+
+		// Store the OBU (as read from the file) in the AU
+		NalUnit unit;
+		unit.m_type = obu_type;
+		unit.m_data = std::move(buffer);
+		buffer.clear();
+		size += (int32_t)(unit.m_data.size());
+		nalUnits.push_back(std::move(unit));
 	}
 }
 

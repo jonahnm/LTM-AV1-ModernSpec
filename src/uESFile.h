@@ -109,6 +109,7 @@ private:
 	Result ReadAccessUnit(AccessUnit& out);
 	Result ReadAccessUnitMarker(AccessUnit &out);
 	Result ReadAccessUnitU32Length(AccessUnit &out);
+	Result ReadAccessUnitOBU(AccessUnit &out);
 
 	// Create a POC that always increases across IDR 
 	uint64_t GenerateIncreasingPOC();

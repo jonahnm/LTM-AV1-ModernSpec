@@ -1,0 +1,66 @@
+diff --git a/libavcodec/lcevcdec.c b/libavcodec/lcevcdec.c
+index 2e16a5a..c9558c0 100644
+--- a/libavcodec/lcevcdec.c
++++ b/libavcodec/lcevcdec.c
+@@ -141,6 +141,7 @@ static int lcevc_send_frame(FFLCEVCFrame *frame_ctx, const AVFrame *in)
+     FFLCEVCContext *lcevc = frame_ctx->lcevc;
+     LCEVC_ColorFormat fmt = map_format(in->format);
+     const AVFrameSideData *sd = av_frame_get_side_data(in, AV_FRAME_DATA_LCEVC);
++
+     AVFrame *opaque;
+     LCEVC_PictureHandle picture;
+     LCEVC_ReturnCode res;
+@@ -149,18 +150,25 @@ static int lcevc_send_frame(FFLCEVCFrame *frame_ctx, const AVFrame *in)
+     if (!sd || fmt == LCEVC_ColorFormat_Unknown)
+         return 1;
+ 
+-    res = LCEVC_SendDecoderEnhancementData(lcevc->decoder, in->pts, sd->data, sd->size);
+-    if (res != LCEVC_Success)
++    // The LCEVC post-processor runs before the decode core propagates the packet
++    // timestamp to the frame, so synthesize a monotonic timestamp when needed.
++    static int64_t fallback_pts = 0;
++    const int64_t pts = in->pts != AV_NOPTS_VALUE ? in->pts : fallback_pts++;
++    opaque = av_frame_clone(in);
++    if (!opaque)
++        return AVERROR(ENOMEM);
++    opaque->pts = pts;
++
++    res = LCEVC_SendDecoderEnhancementData(lcevc->decoder, pts, sd->data, sd->size);
++    if (res != LCEVC_Success) {
++        av_frame_free(&opaque);
+         return AVERROR_EXTERNAL;
++    }
+ 
+     ret = alloc_base_frame(lcevc, in, &picture);
+-    if (ret < 0)
++    if (ret < 0) {
++        av_frame_free(&opaque);
+         return ret;
+-
+-    opaque = av_frame_clone(in);
+-    if (!opaque) {
+-        LCEVC_FreePicture(lcevc->decoder, picture);
+-        return AVERROR(ENOMEM);
+     }
+ 
+     res = LCEVC_SetPictureUserData(lcevc->decoder, picture, opaque);
+@@ -170,7 +178,7 @@ static int lcevc_send_frame(FFLCEVCFrame *frame_ctx, const AVFrame *in)
+         return AVERROR_EXTERNAL;
+     }
+ 
+-    res = LCEVC_SendDecoderBase(lcevc->decoder, in->pts, picture, -1, opaque);
++    res = LCEVC_SendDecoderBase(lcevc->decoder, pts, picture, -1, opaque);
+     if (res != LCEVC_Success) {
+         LCEVC_FreePicture(lcevc->decoder, picture);
+         av_frame_free(&opaque);
+@@ -377,6 +385,10 @@ static int lcevc_init(FFLCEVCContext *lcevc)
+     level = get_log_level(lcevc->loglevel);
+ 
+     LCEVC_ConfigureDecoderInt(lcevc->decoder, "log_level", level);
++    // The API client processes one frame at a time (send frame N, then receive frame N), so
++    // disable the pipeline's frame reordering; otherwise the decoder waits for its reorder
++    // buffer to fill up (default 16 frames) and deadlocks.
++    LCEVC_ConfigureDecoderInt(lcevc->decoder, "default_max_reorder", 0);
+     LCEVC_ConfigureDecoderIntArray(lcevc->decoder, "events", 1, &event);
+     LCEVC_SetDecoderEventCallback(lcevc->decoder, event_callback, lcevc);
+ 

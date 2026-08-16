@@ -209,6 +209,7 @@ std::unique_ptr<BaseDecoder> CreateBaseDecoder(BaseDecoder::Codec base_codec) {
 	extern std::unique_ptr<BaseDecoder> CreateBaseDecoderHEVC();
 	extern std::unique_ptr<BaseDecoder> CreateBaseDecoderVVC();
 	extern std::unique_ptr<BaseDecoder> CreateBaseDecoderEVC();
+	extern std::unique_ptr<BaseDecoder> CreateBaseDecoderAV1();
 	extern std::unique_ptr<BaseDecoder> CreateBaseDecoderYUV();
 
 	switch (base_codec) {
@@ -220,6 +221,8 @@ std::unique_ptr<BaseDecoder> CreateBaseDecoder(BaseDecoder::Codec base_codec) {
 		return std::unique_ptr<BaseDecoder>(CHECK(CreateBaseDecoderVVC()));
 	case BaseDecoder::EVC:
 		return std::unique_ptr<BaseDecoder>(CHECK(CreateBaseDecoderEVC()));
+	case BaseDecoder::AV1:
+		return std::unique_ptr<BaseDecoder>(CHECK(CreateBaseDecoderAV1()));
 	case BaseDecoder::None:
 		return std::unique_ptr<BaseDecoder>(CHECK(CreateBaseDecoderYUV()));
 	default:

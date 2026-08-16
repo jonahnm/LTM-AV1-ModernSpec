@@ -57,7 +57,7 @@ The underlying codec should be given on the command line.
 
   -i, --input_file arg     Input elementary stream filename (default: input.lvc)
   -o, --output_file arg    Output filename for decoded YUV data (default: output.yuv)
-  -b, --base arg           Base codec (avc, hevc, evc, vvc, or yuv) (default: avc)
+  -b, --base arg           Base codec (avc, hevc, evc, vvc, av1, or yuv) (default: avc)
       --base_encoder arg   Base codec (same as --base) (default: avc)
       --base_external      Use an external base codec executable (select for decoding of monochrome output)
   -y, --base_yuv arg       Prepared YUV data for base decode (default: )
@@ -183,3 +183,24 @@ Encode a 10 bit UHD stream, based on HEVC:
 ```
 c:> ModelEncoder --width=3840 --height=2160 --format=yuv420p10 --input_file=Park_3840x2160_50fps_10bpp.yuv --output_file=Park_3840x2160_50fps_QP24_1000.lvc --output_recon=Park_3840x2160_50fps_QP24_1000_enc.yuv --base_encoder=hevc --encapsulation=nal --base=Park_1920x1080_50fps_QP24.avc --base_recon=Park_1920x1080_50fps_QP24_avc.yuv --limit=500 --cq_step_width_loq_1=32767 --cq_step_width_loq_0=1000 
 ```
+
+Encode an 8 bit HD stream, based on AV1 (using SVT-AV1 for the base and dav1d for base decoding):
+
+```
+c:> ModelEncoder --width=1920 --height=1080 --format=yuv420p --input_file=Cact_1920x1080_50fps_08bpp.yuv --output_file=Cact_1920x1080_50fps_QP24_1000.lvc --output_recon=Cact_1920x1080_50fps_QP24_1000_enc.yuv --base_encoder=av1 --encapsulation=nal --limit=500 --cq_step_width_loq_1=32767 --cq_step_width_loq_0=1000 
+```
+
+Please note that SVT-AV1 (`SvtAv1EncApp`, or `SVT-AV1/SvtAv1EncApp` in the `external_codecs` folder) and dav1d (or `LCEVC_DAV1D=<path>` to select a specific dav1d binary) must be available on the command path.
+
+## Current MPEG-5 Part 2 (ISO/IEC 23094-2) bitstream
+
+The encoder produces bitstreams conforming to the current MPEG-5 Part 2 standard as decoded by the
+MPEG-5 LCEVC decoder SDK (https://github.com/v-novaltd/LCEVCdec):
+
+* The V-Nova configuration (user data registered SEI payload) is emitted on every IDR frame to
+  signal the bitstream version.
+* The Huffman code-length bit widths and the coded resolution table match the current standard.
+* The LCEVC data is carried in standard LCEVC NAL units (types 28/29), either standalone or inside
+  a registered user data SEI message.
+* For an AV1 base, the LCEVC NAL unit is carried in an AV1 metadata OBU with an ITU-T T.35 payload
+  (V-Nova provider code 0x5000), as extracted by FFmpeg's AV1 decoder and fed to the LCEVC decoder.

@@ -61,7 +61,20 @@ YUVReader::YUVReader(const std::string &name, const ImageDescription &image_desc
                      uintmax_t fileSize)
     : name_(name), image_description_(image_description), length_(length), rate_(rate), file_(file), fileSize_(fileSize) {}
 
+YUVReader::YUVReader(const std::string &name, const ImageDescription &image_description, unsigned length, float rate,
+                     FILE *stream)
+    : name_(name), fileSize_(static_cast<uintmax_t>(-1)), image_description_(image_description), length_(length), rate_(rate),
+      stream_(stream) {
+
+	CHECK(stream_ != nullptr);
+}
+
+FILE *YUVReader::input_stream() const { return stream_ ? stream_ : file_.get(); }
+
 void YUVReader::update_data(const ImageDescription &image_description) {
+	if (stream_)
+		ERR("Cannot update data of a stream reader");
+
 	if (fileSize_ == static_cast<uintmax_t>(-1))
 		ERR("Cannot open YUV file");
 
@@ -79,8 +92,16 @@ void YUVReader::update_data(const ImageDescription &image_description) {
 
 void YUVReader::set_position(unsigned position) const {
 	CHECK(position < length_);
-	position_ = position;
-	CHECK(fseeko(file_.get(), (uint64_t)position_ * (uint64_t)image_description_.byte_size(), SEEK_SET) == 0);
+
+	if (stream_) {
+		// Streams can only be read sequentially
+		CHECK(position == position_);
+		position_ = position + 1;
+	} else {
+		if (position != position_)
+			CHECK(fseeko(file_.get(), (uint64_t)position * (uint64_t)image_description_.byte_size(), SEEK_SET) == 0);
+		position_ = position;
+	}
 }
 
 // Get image from frame position
@@ -88,17 +109,18 @@ Image YUVReader::read(unsigned position, uint64_t timestamp) const {
 	set_position(position);
 
 	std::vector<Surface> surfaces;
+	FILE *f = input_stream();
 
 	for (unsigned p = 0; p < image_description_.num_planes(); ++p) {
 		auto b = Surface::build_from<int8_t>();
 		b.reserve_bpp(image_description_.width(p), image_description_.height(p), image_description_.byte_depth(),
 		              image_description_.row_stride(p));
 		if (image_description_.rows_are_contiguous(p)) {
-			if (fread(b.data(), image_description_.plane_size(p), 1, file_.get()) != 1)
+			if (fread(b.data(), image_description_.plane_size(p), 1, f) != 1)
 				ERR("Cannot read YUV file");
 		} else {
 			for (unsigned y = 0; y < image_description_.height(p); ++y) {
-				if (fread(b.data(0, y), image_description_.row_size(p), 1, file_.get()) != 1)
+				if (fread(b.data(0, y), image_description_.row_size(p), 1, f) != 1)
 					ERR("Cannot read YUV file");
 			}
 		}
@@ -237,5 +259,12 @@ unique_ptr<YUVReader> CreateYUVReader(const string &name, unsigned rate) {
 	ERR("Cannot open YUV file");
 	return 0;
 };
+
+// Read from an existing stream (e.g. a pipe) - the stream is not owned and must be closed by
+// the caller. The stream is read sequentially; 'length' is the number of frames available.
+//
+unique_ptr<YUVReader> CreateYUVReader(FILE *stream, const ImageDescription &description, unsigned length, unsigned rate) {
+	return unique_ptr<YUVReader>(new YUVReader("<stream>", description, length, (float)rate, stream));
+}
 
 } // namespace lctm

@@ -300,7 +300,15 @@ void Encoder::update_global_configuration(const Parameters &p, const Parameters 
 	configuration_.global_configuration.additional_info_present = p["additional_info_present"].get<bool>(false);
 	configuration_.global_configuration.sei_message_present = p["sei_message_present"].get<bool>(false);
 	configuration_.global_configuration.vui_message_present = p["vui_message_present"].get<bool>(false);
-	if (configuration_.global_configuration.additional_info_present) {
+
+	// Emit the V-Nova configuration (user data registered SEI) on every IDR frame. This signals
+	// the bitstream version to the decoder, as per ISO/IEC 23094-2:2024 Annex E.
+	if (p["v_nova_config"].get<bool>(true)) {
+		configuration_.global_configuration.additional_info_present = true;
+		configuration_.additional_info.additional_info_type = 0;  // SEI
+		configuration_.additional_info.payload_type = 4;          // user data registered
+		configuration_.additional_info.bitstream_version = 2;     // BitstreamVersionAlignWithSpec
+	} else if (configuration_.global_configuration.additional_info_present) {
 		configuration_.additional_info.additional_info_type = p["additional_info_type"].get<unsigned>(2);
 	}
 

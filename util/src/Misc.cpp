@@ -54,6 +54,10 @@
 #if defined(__linux__)
 #include <pthread.h>
 #include <unistd.h>
+#elif defined(__APPLE__)
+#include <pthread.h>
+#include <unistd.h>
+#include <mach-o/dyld.h>
 #elif defined(WIN32) || defined(WIN64)
 #include <process.h>
 #endif
@@ -89,6 +93,13 @@ std::string get_program_directory(const std::string &suffix) {
 }
 #else
 std::string get_program() {
+#if defined(__APPLE__)
+	char tmp[PATH_MAX] = "";
+	uint32_t size = sizeof(tmp);
+	if (_NSGetExecutablePath(tmp, &size) != 0)
+		return "";
+	return tmp;
+#else
 	char tmp[PATH_MAX] = "";
 
 	// Use /proc & readlink() to get real executable path
@@ -97,22 +108,18 @@ std::string get_program() {
 	int s = readlink(link, tmp, sizeof(tmp));
 
 	return tmp;
+#endif
 }
 
 std::string get_program_directory(const std::string &suffix) {
-	char tmp[PATH_MAX] = "";
-
-	// Use /proc & readlink() to get real executable path
-	char link[PATH_MAX];
-	sprintf(link, "/proc/%d/exe", getpid());
-	int s = readlink(link, tmp, sizeof(tmp));
+	const std::string program = get_program();
 
 	// Trim away filename
-	while (s > 0 && tmp[s - 1] != '/')
-		s--;
-	tmp[s] = '\0';
+	size_t s = program.find_last_of('/');
+	if (s == std::string::npos)
+		return suffix;
 
-	return tmp + suffix;
+	return program.substr(0, s + 1) + suffix;
 }
 #endif
 

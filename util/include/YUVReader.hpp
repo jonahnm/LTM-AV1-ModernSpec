@@ -61,12 +61,16 @@ private:
 	friend std::unique_ptr<YUVReader> CreateYUVReader(const std::string &name, unsigned rate);
 	friend std::unique_ptr<YUVReader> CreateYUVReader(const std::string &name, const ImageDescription &image_description,
 	                                                  unsigned rate);
+	friend std::unique_ptr<YUVReader> CreateYUVReader(FILE *stream, const ImageDescription &image_description, unsigned length,
+	                                                  unsigned rate);
 
 	YUVReader(const std::string &name, float rate, FILE *file, uintmax_t fileSize);
 	YUVReader(const std::string &name, const ImageDescription &image_description, unsigned length, float rate, FILE *file,
 	          uintmax_t fileSize);
+	YUVReader(const std::string &name, const ImageDescription &image_description, unsigned length, float rate, FILE *stream);
 
 	void set_position(unsigned position) const;
+	FILE *input_stream() const;
 
 	std::string name_;
 	uintmax_t fileSize_;
@@ -77,11 +81,19 @@ private:
 
 	UniquePtrFile file_;
 
+	// Stream read from without owning it - e.g. a pipe; read sequentially only
+	FILE *stream_ = nullptr;
+
 	mutable unsigned position_ = 0;
 };
 
 std::unique_ptr<YUVReader> CreateYUVReader(const std::string &name);
 std::unique_ptr<YUVReader> CreateYUVReader(const std::string &name, unsigned rate);
 std::unique_ptr<YUVReader> CreateYUVReader(const std::string &name, const ImageDescription &image_description, unsigned rate);
+
+// Read from an existing stream (e.g. a pipe) - the stream is not owned and must be closed by the
+// caller. The stream is read sequentially; 'length' is the number of frames available.
+std::unique_ptr<YUVReader> CreateYUVReader(FILE *stream, const ImageDescription &image_description, unsigned length,
+                                           unsigned rate);
 
 } // namespace lctm

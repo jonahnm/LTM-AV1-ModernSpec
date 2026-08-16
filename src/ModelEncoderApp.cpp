@@ -117,7 +117,7 @@ int main(int argc, char *argv[]) {
 			("help", "Show this help");
 
 		options_description.add_options("Base Encoder Configuration")
-			("b,base_encoder", "Base encoder plugin to use (avc, hevc, vvc, or evc)", cxxopts::value<string>()->default_value("avc"))
+			("b,base_encoder", "Base encoder plugin to use (avc, hevc, vvc, evc, x265, or av1)", cxxopts::value<string>()->default_value("avc"))
 			("qp", "QP value to be used by the specified base encoder", cxxopts::value<unsigned>()->default_value("28"))
 			("base", "Encoded base bitstream if base encoder shall be skipped", cxxopts::value<string>())
 			("base_recon", "Decoded YUV for base bitstream", cxxopts::value<string>())

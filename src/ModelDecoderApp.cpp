@@ -133,7 +133,7 @@ int main(int argc, char *argv[]) {
 		options_description.add_options()
 			("i,input_file", "Input elementary stream filename", cxxopts::value<string>()->default_value("input.lvc"))
 			("o,output_file", "Output filename for decoded YUV data", cxxopts::value<string>()->default_value("output.yuv"))
-			("b,base", "Base codec (avc, hevc, evc, vvc, or yuv)", cxxopts::value<string>()->default_value("avc"))
+			("b,base", "Base codec (avc, hevc, evc, vvc, av1, or yuv)", cxxopts::value<string>()->default_value("avc"))
 			("base_encoder", "Base codec (same as --base)", cxxopts::value<string>()->default_value("avc"))
 			("base_external", "Use an external base codec executable (select for decoding of monochrome output)", cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
 			("y,base_yuv", "Prepared YUV data for base decode", cxxopts::value<string>()->default_value(""))
@@ -195,6 +195,9 @@ int main(int argc, char *argv[]) {
 			break;
 		case BaseCoding_EVC:
 			file_base = BaseDecoder::EVC;
+			break;
+		case BaseCoding_AV1:
+			file_base = BaseDecoder::AV1;
 			break;
 		case BaseCoding_YUV:
 			file_base = BaseDecoder::None;

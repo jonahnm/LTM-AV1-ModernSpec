@@ -46,11 +46,13 @@ namespace lctm {
 
 // Number of bits used to store codes
 //
+// BitstreamVersionAlignWithSpec: lengths are indexed by (max_length - min_length), as per 9.2.1
+// of the ISO/IEC 23094-2:2024 standard.
+//
 unsigned HuffmanDecoder::bit_width(unsigned n) {
 	// clang-format off
 	static const uint8_t table[32] = {
-		// Figure 17 & 18: out = log2(max_length - min_length + 1);
-		1, 1, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, // 0   - 15
+		0, 1, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, // 0   - 15
 		5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, // 16  - 31
 	};
 	// clang-format on

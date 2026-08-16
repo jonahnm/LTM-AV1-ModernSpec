@@ -149,6 +149,7 @@ struct PictureConfiguration {
 struct AdditionalInfo {
 	unsigned additional_info_type;
 	unsigned payload_type;
+	unsigned bitstream_version;
 };
 
 struct SeiMasteringDisplayColourVolume {

@@ -65,18 +65,27 @@ private:
 	friend std::unique_ptr<YUVWriter> CreateYUVWriter(const std::string &name);
 	friend std::unique_ptr<YUVWriter> CreateYUVWriter(const std::string &name, const ImageDescription &image_description,
 	                                                  bool decorate);
+	friend std::unique_ptr<YUVWriter> CreateYUVWriter(FILE *stream, const ImageDescription &image_description);
 	YUVWriter(const std::string &name);
 	YUVWriter(const std::string &name, const ImageDescription &image_description, bool decorate);
+	YUVWriter(FILE *stream, const ImageDescription &image_description);
 
 	void write_surface(const Surface &surface);
+	FILE *output_stream() const;
 
 	ImageDescription image_description_;
 	std::string filename_;
 
 	UniquePtrFile file_;
+
+	// Stream written to without owning it - e.g. a pipe
+	FILE *stream_ = nullptr;
 };
 
 std::unique_ptr<YUVWriter> CreateYUVWriter(const std::string &name);
 std::unique_ptr<YUVWriter> CreateYUVWriter(const std::string &name, const ImageDescription &image_description, bool decorate);
+
+// Write to an existing stream (e.g. a pipe) - the stream is not owned and must be closed by the caller
+std::unique_ptr<YUVWriter> CreateYUVWriter(FILE *stream, const ImageDescription &image_description);
 
 } // namespace lctm

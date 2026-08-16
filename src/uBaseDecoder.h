@@ -97,14 +97,15 @@ struct BaseDecNalUnitType {
 enum NALDelimitier {
 	NALDelimiterNone = 0,
 	NALDelimiterMarker,
-	NALDelimiterU32Length
+	NALDelimiterU32Length,
+	NALDelimiterOBU
 };
 
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 class BaseDecoder {
 public:
-	enum Codec { None, AVC, HEVC, VVC, EVC };
+	enum Codec { None, AVC, HEVC, VVC, EVC, AV1 };
 
 	BaseDecoder();
 	virtual ~BaseDecoder();

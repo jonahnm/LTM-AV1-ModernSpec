@@ -35,7 +35,10 @@ if (UNIX)
   set(CMAKE_SHARED_LINK_FLAGS_RELEASE "-g -O3 -fomit-frame-pointer -funroll-loops")
   set(CMAKE_EXE_LINK_FLAGS_RELEASE "-g -O3 -fomit-frame-pointer -funroll-loops")
 
-  list(APPEND LCEVC_EXTERNAL_LINK_LIBS m gcov dl)
+  list(APPEND LCEVC_EXTERNAL_LINK_LIBS m dl)
+  if (CMAKE_COMPILER_IS_GNUCC)
+    list(APPEND LCEVC_EXTERNAL_LINK_LIBS gcov)
+  endif(CMAKE_COMPILER_IS_GNUCC)
 endif(UNIX)
 
 if (WIN32)
@@ -113,6 +116,7 @@ list(APPEND DECODER_SRCS
   ${SRC_DIR}/src/uBaseDecoderHEVC.cpp
   ${SRC_DIR}/src/uBaseDecoderVVC.cpp
   ${SRC_DIR}/src/uBaseDecoderYUV.cpp
+  ${SRC_DIR}/src/uBaseDecoderAV1.cpp
   ${SRC_DIR}/src/uESFile.cpp
   ${SRC_DIR}/src/uYUVDesc.cpp
   ${SRC_DIR}/src/uString.cpp )
@@ -182,6 +186,7 @@ list(APPEND ENCODER_SRCS
   ${SRC_DIR}/src/uBaseDecoderHEVC.cpp
   ${SRC_DIR}/src/uBaseDecoderVVC.cpp
   ${SRC_DIR}/src/uBaseDecoderYUV.cpp
+  ${SRC_DIR}/src/uBaseDecoderAV1.cpp
   ${SRC_DIR}/src/uESFile.cpp  )
 
 ### Tests

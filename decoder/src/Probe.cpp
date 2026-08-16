@@ -66,6 +66,9 @@ bool probe_es_file(const string &name, BaseCoding coding, unsigned &width, unsig
 	case BaseCoding_EVC:
 		es_type = BaseDecoder::EVC;
 		break;
+	case BaseCoding_AV1:
+		es_type = BaseDecoder::AV1;
+		break;
 	default:
 		CHECK(0);
 	}

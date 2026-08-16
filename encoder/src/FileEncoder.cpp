@@ -88,10 +88,36 @@ extern priority_queue<ReportStructure, vector<ReportStructure, allocator<ReportS
 
 using namespace vnova::utility;
 
+// Portable popen/pclose
+//
+#if defined(_WIN32) || defined(WIN32) || defined(WIN64)
+#define LCEVC_POPEN _popen
+#define LCEVC_PCLOSE _pclose
+#else
+#define LCEVC_POPEN popen
+#define LCEVC_PCLOSE pclose
+#endif
+
 #include "nlohmann/json.hpp"
 using json = nlohmann::json;
 
 namespace lctm {
+
+// Resolve the path to an external codec executable - prefer the copy in the external_codecs
+// directory (next to the test model executable), otherwise fall back to the name on PATH.
+//
+static string codec_executable(const string &name) {
+	const string local = get_program_directory(format("external_codecs/%s", name.c_str()));
+	if (FILE *f = fopen(local.c_str(), "r")) {
+		fclose(f);
+		return local;
+	}
+	// Fall back to the executable name on PATH
+	const size_t slash = name.find_last_of("/\\");
+	if (slash != string::npos)
+		return name.substr(slash + 1);
+	return name;
+}
 
 // Implementation is specialised for base codec
 //
@@ -122,6 +148,24 @@ public:
 
 	virtual BaseDecoder::Codec es_file_type() const = 0;
 	virtual BaseCoding base_coding() const = 0;
+
+	// Streaming base I/O support. When supported, the base encoder consumes the downsampled
+	// base YUV from a pipe (start_base_encoder_stream) and the base reconstruction is decoded
+	// back through a pipe (open_base_recon_stream), avoiding full-size raw YUV files on disk.
+	// The default implementation uses temporary files.
+	virtual bool streams_base_io() const { return false; }
+	virtual FILE *start_base_encoder_stream(const string &es_file, unsigned frame_count) const {
+		CHECK(0);
+		return nullptr;
+	}
+	virtual bool finish_base_encoder_stream(FILE *input) const {
+		CHECK(0);
+		return false;
+	}
+	virtual FILE *open_base_recon_stream(const string &es_file) const {
+		CHECK(0);
+		return nullptr;
+	}
 
 protected:
 	// Body of encode loop
@@ -201,15 +245,12 @@ void FileEncoderImpl::encode_file(const string &src_filename, const string &dst_
 		base_recon_filename = "base_recon.yuv";
 	}
 
-	INFO("Using temporary file for base YUV: %s", base_yuv_filename.c_str());
 	INFO("Using temporary file for base stream: %s", base_bin_filename.c_str());
-	INFO("Using temporary file for base recon: %s", base_recon_filename.c_str());
 
 	// Read source and downsample into base
 	//
 	unique_ptr<YUVReader> src_file(CHECK(CreateYUVReader(src_filename, encoder_.src_image_description(), fps_)));
 	initialize_encoder(*src_file, limit);
-	auto base_yuv = CHECK(CreateYUVWriter(base_yuv_filename, encoder_.base_image_description(), true));
 
 	int64_t pts = 0;
 	int64_t duration = 90000L / fps_;
@@ -218,22 +259,61 @@ void FileEncoderImpl::encode_file(const string &src_filename, const string &dst_
 	INFO("input limit %8d - local count %8d", limit, frame_count);
 	const bool level1_depth_flag = encoder_.level1_depth_flag();
 
-	for (unsigned f = 0; f < frame_count; ++f, pts += duration) {
-		INFO("Writing base %d", f);
-		const Image src = ExpandImage(src_file->read(f, pts), encoder_.enhancement_image_description());
-		// Downsample and bit shifting depending base and enhancement bit depths
-		const Image img = DownsampleImage(DownsampleImage(src, downsample_luma_, downsample_chroma_, scaling_mode_[LOQ_LEVEL_2],
-		                                                  level1_depth_flag ? 0 : encoder_.base_image_description().bit_depth()),
-		                                  downsample_luma_, downsample_chroma_, scaling_mode_[LOQ_LEVEL_1],
-		                                  level1_depth_flag ? encoder_.base_image_description().bit_depth()	: 0);
-		base_yuv->write(img);
+	// Base reconstruction - either streamed back from the base decoder through a pipe (no raw
+	// YUV files on disk), or produced by the base encoder into a temporary file
+	//
+	unique_ptr<YUVReader> recon_file;
+	FILE *recon_stream = nullptr;
+
+	if (streams_base_io()) {
+		// Feed the downsampled base into the base encoder through a pipe
+		INFO("Using streaming base encode - no raw YUV files on disk");
+
+		FILE *base_input = start_base_encoder_stream(base_bin_filename, frame_count);
+		{
+			unique_ptr<YUVWriter> base_yuv(CreateYUVWriter(base_input, encoder_.base_image_description()));
+
+			for (unsigned f = 0; f < frame_count; ++f, pts += duration) {
+				INFO("Writing base %d", f);
+				const Image src = ExpandImage(src_file->read(f, pts), encoder_.enhancement_image_description());
+				// Downsample and bit shifting depending base and enhancement bit depths
+				const Image img = DownsampleImage(DownsampleImage(src, downsample_luma_, downsample_chroma_,
+				                                                  scaling_mode_[LOQ_LEVEL_2],
+				                                                  level1_depth_flag ? 0 : encoder_.base_image_description().bit_depth()),
+				                                  downsample_luma_, downsample_chroma_, scaling_mode_[LOQ_LEVEL_1],
+				                                  level1_depth_flag ? encoder_.base_image_description().bit_depth() : 0);
+				base_yuv->write(img);
+			}
+		}
+		CHECK(finish_base_encoder_stream(base_input));
+
+		// Decode the base reconstruction back through a pipe
+		recon_stream = open_base_recon_stream(base_bin_filename);
+		recon_file = CHECK(CreateYUVReader(recon_stream, encoder_.base_image_description(), frame_count, fps_));
+	} else {
+		INFO("Using temporary file for base YUV: %s", base_yuv_filename.c_str());
+		INFO("Using temporary file for base recon: %s", base_recon_filename.c_str());
+
+		unique_ptr<YUVWriter> base_yuv(CHECK(CreateYUVWriter(base_yuv_filename, encoder_.base_image_description(), true)));
+
+		for (unsigned f = 0; f < frame_count; ++f, pts += duration) {
+			INFO("Writing base %d", f);
+			const Image src = ExpandImage(src_file->read(f, pts), encoder_.enhancement_image_description());
+			// Downsample and bit shifting depending base and enhancement bit depths
+			const Image img = DownsampleImage(DownsampleImage(src, downsample_luma_, downsample_chroma_,
+			                                                  scaling_mode_[LOQ_LEVEL_2],
+			                                                  level1_depth_flag ? 0 : encoder_.base_image_description().bit_depth()),
+			                                  downsample_luma_, downsample_chroma_, scaling_mode_[LOQ_LEVEL_1],
+			                                  level1_depth_flag ? encoder_.base_image_description().bit_depth() : 0);
+			base_yuv->write(img);
+		}
+
+		// Run the base encoder yuv-file-> es-file and recon
+		run_base_encoder(base_yuv->filename(), base_bin_filename, base_recon_filename, frame_count);
+
+		// Open file
+		recon_file = CHECK(CreateYUVReader(base_recon_filename, encoder_.base_image_description(), fps_));
 	}
-
-	// Run the base encoder yuv-file-> es-file and recon
-	run_base_encoder(base_yuv->filename(), base_bin_filename, base_recon_filename, frame_count);
-
-	// Open file
-	unique_ptr<YUVReader> recon_file(CHECK(CreateYUVReader(base_recon_filename, encoder_.base_image_description(), fps_)));
 
 	UniquePtrFile output_file(CHECK(fopen(format("%s", dst_filename.c_str()).c_str(), "wb")));
 
@@ -248,6 +328,11 @@ void FileEncoderImpl::encode_file(const string &src_filename, const string &dst_
 	clock_t EnhaClock2 = clock();
 
 	INFO("**** Encode enhancement. delta. %16d secs", (EnhaClock2 - EnhaClock1) / CLOCKS_PER_SEC);
+
+	// Close the recon stream (waits for the base decoder to finish)
+	if (recon_stream)
+		LCEVC_PCLOSE(recon_stream);
+
 	// Clear up
 	if (!parameters_["keep_base"].get<bool>(false)) {
 		::remove(base_yuv_filename.c_str());
@@ -275,15 +360,29 @@ void FileEncoderImpl::encode_file_with_decoder(const string &src_filename, const
 	}
 
 	// Generate base recon.
-	string base_recon_filename = make_temporary_filename(
-	    format("_base_recon_%dx%d.yuv", encoder_.base_image_description().width(), encoder_.base_image_description().height()));
-	INFO("Using temporary file for base recon: %s", base_recon_filename.c_str());
+	//
+	unique_ptr<YUVReader> recon_file;
+	FILE *recon_stream = nullptr;
+	string base_recon_filename;
 
-	INFO("-- Starting decoding process: %.3f", system_timestamp() / 1000000.0);
-	run_base_decoder(base_filename, base_recon_filename);
+	if (streams_base_io()) {
+		// Decode the base reconstruction back through a pipe - no raw YUV files on disk
+		INFO("Using streaming base decode - no raw YUV files on disk");
 
-	// Open file
-	unique_ptr<YUVReader> recon_file(CHECK(CreateYUVReader(base_recon_filename, encoder_.base_image_description(), fps_)));
+		const unsigned frame_count = min(src_file->length(), limit);
+		recon_stream = open_base_recon_stream(base_filename);
+		recon_file = CHECK(CreateYUVReader(recon_stream, encoder_.base_image_description(), frame_count, fps_));
+	} else {
+		base_recon_filename = make_temporary_filename(
+		    format("_base_recon_%dx%d.yuv", encoder_.base_image_description().width(), encoder_.base_image_description().height()));
+		INFO("Using temporary file for base recon: %s", base_recon_filename.c_str());
+
+		INFO("-- Starting decoding process: %.3f", system_timestamp() / 1000000.0);
+		run_base_decoder(base_filename, base_recon_filename);
+
+		// Open file
+		recon_file = CHECK(CreateYUVReader(base_recon_filename, encoder_.base_image_description(), fps_));
+	}
 
 	UniquePtrFile output_file(CHECK(fopen(format("%s", dst_filename.c_str()).c_str(), "wb")));
 
@@ -291,6 +390,10 @@ void FileEncoderImpl::encode_file_with_decoder(const string &src_filename, const
 	CHECK(es_file.Open(base_filename, es_file_type()));
 
 	encode(*src_file, *recon_file, output_file.get(), es_file, dst_filename_yuv, limit);
+
+	// Close the recon stream (waits for the base decoder to finish)
+	if (recon_stream)
+		LCEVC_PCLOSE(recon_stream);
 
 	// Clear up
 	if (!parameters_["keep_base"].get<bool>(false)) {
@@ -616,7 +719,6 @@ ESFile::NalUnit FileEncoderImpl::build_nalu(const bool is_idr, const Packet &pay
 	const Packet rbsp = rbsp_encapsulate(nal_payload(payload));
 	const PacketView v(rbsp);
 	nal_unit.m_data.insert(nal_unit.m_data.end(), v.data(), v.data() + v.size());
-
 	return nal_unit;
 }
 
@@ -1206,6 +1308,189 @@ public:
 	}
 };
 
+//// AV1 Base Codec
+//
+// The AV1 base stream is generated with the SVT-AV1 encoder (SvtAv1EncApp) in low overhead OBU
+// format (--obu). The LCEVC enhancement data is carried in an AV1 metadata OBU using an ITU-T
+// T.35 payload with the V-Nova provider code, containing the standard LCEVC NAL unit - as parsed
+// by FFmpeg's AV1 decoder (AV_FRAME_DATA_LCEVC) and fed to the LCEVC decoder.
+//
+class FileEncoderImplAV1 : public FileEncoderImpl {
+public:
+	FileEncoderImplAV1(const ImageDescription &image_description, unsigned fps, const Parameters &parameters)
+	    : FileEncoderImpl(image_description, fps, parameters) {}
+
+	BaseDecoder::Codec es_file_type() const override { return BaseDecoder::AV1; };
+	BaseCoding base_coding() const override { return BaseCoding_AV1; }
+
+	// Stream the base YUV into the base encoder and the base recon back out, so that no
+	// full-size raw YUV files are written to disk
+	bool streams_base_io() const override { return true; }
+
+	// Start SVT-AV1 reading the downsampled base YUV from stdin - returns a pipe to write into
+	//
+	FILE *start_base_encoder_stream(const string &es_file, unsigned frame_count) const override {
+		if (encoder_.base_image_description().colourspace() != Colourspace_YUV420)
+			ERR("Only encodings with a 4:2:0 colourspace are supported by SVT-AV1.");
+		if (encoder_.base_image_description().bit_depth() != Bitdepth_8 &&
+		    encoder_.base_image_description().bit_depth() != Bitdepth_10)
+			ERR("SVT-AV1 supports 8-bit and 10-bit inputs only.");
+
+		const string prog = codec_executable("SVT-AV1/SvtAv1EncApp");
+		const unsigned qp = encoder_.base_qp();
+
+		string cmd_line =
+		    format("%s -i stdin -w %d -h %d --fps-num %d --fps-denom 1 --input-depth %d --qp %d --preset 8 "
+		           "--pred-struct 1 --enable-tf 0 --keyint %d -n %d --obu -b %s --progress 0",
+		           prog.c_str(), encoder_.base_image_description().width(), encoder_.base_image_description().height(), fps_,
+		           encoder_.base_image_description().bit_depth(), qp, intra_period(), frame_count, es_file.c_str());
+
+		INFO("Running: %s", cmd_line.c_str());
+		return LCEVC_POPEN(cmd_line.c_str(), "w");
+	}
+
+	bool finish_base_encoder_stream(FILE *input) const override { return LCEVC_PCLOSE(input) == 0; }
+
+	// Start dav1d decoding the base stream and writing the recon YUV to stdout - returns a pipe
+	// to read the reconstructed base from
+	//
+	FILE *open_base_recon_stream(const string &es_file) const override {
+		string p = codec_executable("dav1d/dav1d");
+		if (getenv("LCEVC_DAV1D"))
+			p = getenv("LCEVC_DAV1D");
+
+		INFO("Using base decoder %s (streaming)", p.c_str());
+
+		return LCEVC_POPEN(format("%s -i %s -o - --muxer yuv -q", p.c_str(), es_file.c_str()).c_str(), "r");
+	}
+
+	// AV1 OBU types
+	enum OBUType {
+		OBU_SEQUENCE_HEADER = 1,
+		OBU_TEMPORAL_DELIMITER,
+		OBU_FRAME_HEADER,
+		OBU_TILE_GROUP,
+		OBU_METADATA,
+		OBU_FRAME,
+		OBU_REDUNDANT_FRAME_HEADER,
+		OBU_TILE_LIST,
+		OBU_PADDING = 15,
+	};
+
+	// ITU-T T.35 provider code for V-Nova (registered user data)
+	static const uint8_t kVNovaItuHeader[4];
+
+	// Write a leb128 value into a packet
+	//
+	static void write_leb128(BitstreamPacker &b, uint64_t value) {
+		uint8_t byte;
+		do {
+			byte = value & 0x7f;
+			value >>= 7;
+			if (value)
+				byte |= 0x80;
+			b.u(8, byte);
+		} while (value);
+	}
+
+	// Build an AV1 metadata OBU carrying the LCEVC data in an ITU-T T.35 (V-Nova) payload
+	//
+	ESFile::NalUnit build_metadata_obu(bool is_idr, const Packet &payload) const {
+		// LCEVC NAL unit to be embedded in the metadata OBU payload
+		const ESFile::NalUnit nal_unit_lcevc = build_nalu(is_idr, payload);
+
+		BitstreamPacker obu;
+
+		// OBU header: forbidden_zero_bit=0, obu_type=5 (metadata), extension=0, has_size=1, reserved=0
+		obu.u(8, 0x2a);
+
+		// Metadata OBU payload: metadata_type, ITU-T T.35 (4)
+		//   itu_t_t35_country_code: 0xb4 (UK)
+		//   t35_uk_country_code_second_octet: 0x00
+		//   itu_t_t35_provider_code: 0x5000 (V-Nova)
+		//   payload: LCEVC NAL unit
+		//   trailing bits: 0x80 - the OBU payload must terminate with trailing bits
+		//   (trailing_one_bit followed by zero padding), as expected by the AV1 parsers in
+		//   dav1d and FFmpeg. The embedded LCEVC NAL unit itself also ends with an RBSP
+		//   stop-bit (0x80), so an explicit trailing byte is required.
+		const uint32_t obu_payload_size = (uint32_t)(1 + 4 + nal_unit_lcevc.m_data.size() + 1);
+		write_leb128(obu, obu_payload_size);
+
+		obu.u(8, 0x04); // metadata_type = ITU-T T.35
+		obu.bytes(kVNovaItuHeader, sizeof(kVNovaItuHeader));
+
+		const Packet lcevc_packet = Packet::build().contents(nal_unit_lcevc.m_data).finish();
+		const PacketView v(lcevc_packet);
+		obu.bytes(v);
+
+		obu.u(8, 0x80); // trailing bits
+
+		ESFile::NalUnit nal_unit;
+		nal_unit.m_type = OBU_METADATA;
+		const Packet obu_packet = obu.finish();
+		const PacketView ov(obu_packet);
+		nal_unit.m_data.assign(ov.data(), ov.data() + ov.size());
+		return nal_unit;
+	}
+
+	bool run_base_encoder(const string &yuv_file, const string &es_file, const string &recon_file,
+	                      unsigned frame_count) const override {
+		if (encoder_.base_image_description().colourspace() != Colourspace_YUV420)
+			ERR("Only encodings with a 4:2:0 colourspace are supported by SVT-AV1.");
+		if (encoder_.base_image_description().bit_depth() != Bitdepth_8 &&
+		    encoder_.base_image_description().bit_depth() != Bitdepth_10)
+			ERR("SVT-AV1 supports 8-bit and 10-bit inputs only.");
+
+		const string prog = codec_executable("SVT-AV1/SvtAv1EncApp");
+		const unsigned qp = encoder_.base_qp();
+
+		string cmd_line =
+		    format("%s -i %s -w %d -h %d --fps-num %d --fps-denom 1 --input-depth %d --qp %d --preset 8 "
+		           "--pred-struct 1 --enable-tf 0 --keyint %d -n %d --obu -b %s --progress 0 -o %s",
+		           prog.c_str(), yuv_file.c_str(), encoder_.base_image_description().width(),
+		           encoder_.base_image_description().height(), fps_, encoder_.base_image_description().bit_depth(), qp,
+		           intra_period(), frame_count, es_file.c_str(), recon_file.c_str());
+
+		INFO("Running: %s", cmd_line.c_str());
+		return system(cmd_line.c_str()) == 0;
+	}
+
+	// Insert enhancement data - as a metadata OBU placed before the frame OBUs of the access
+	// unit. The AV1 metadata OBU semantics attach metadata to the frame that follows it, so the
+	// LCEVC data must precede the frame it applies to.
+	//
+	int add_enhancement(ESFile::AccessUnit &au, bool is_idr, const Packet &payload) override {
+		if (encapsulation_ == Encapsulation_None || encapsulation_ == Encapsulation_NAL) {
+			ESFile::NalUnit nal_unit = build_metadata_obu(is_idr, payload);
+
+			// Insert after any leading temporal delimiter, before the frame OBUs
+			unsigned offset = 0;
+			while (offset < au.m_nalUnits.size() && au.m_nalUnits[offset].m_type == OBU_TEMPORAL_DELIMITER)
+				++offset;
+			au.m_nalUnits.insert(au.m_nalUnits.begin() + offset, nal_unit);
+			return (int)(nal_unit.m_data.size());
+		}
+
+		ERR("Only 'nal' encapsulation is supported for the AV1 base codec.");
+		CHECK(0);
+		return 0;
+	}
+
+	bool run_base_decoder(const string &input, const string &output) override {
+		string p = codec_executable("dav1d/dav1d");
+		if (getenv("LCEVC_DAV1D"))
+			p = getenv("LCEVC_DAV1D");
+
+		INFO("Using base decoder %s", p.c_str());
+
+		return system(format("%s -i %s -o %s --muxer yuv -q", p.c_str(), input.c_str(), output.c_str()).c_str()) == 0;
+	}
+};
+
+const uint8_t FileEncoderImplAV1::kVNovaItuHeader[4] = {0xb4, 0x00, 0x50, 0x00};
+
+
+
 // Downsample input according to current settings and write to output file
 //
 void FileEncoderImpl::downsample_file(const string &input_file, const string &output_file, unsigned limit) {
@@ -1257,6 +1542,8 @@ unique_ptr<FileEncoder> CreateFileEncoder(BaseCoding base_encoder, const ImageDe
 			return unique_ptr<FileEncoder>(new FileEncoderImplEVC(image_description, fps, parameters));
 		else if (base_encoder == BaseCoding_X265)
 			return unique_ptr<FileEncoder>(new FileEncoderImplX265(image_description, fps, parameters));
+		else if (base_encoder == BaseCoding_AV1)
+			return unique_ptr<FileEncoder>(new FileEncoderImplAV1(image_description, fps, parameters));
 		else
 			ERR("Unknown base codec");
 	} catch (string e) {

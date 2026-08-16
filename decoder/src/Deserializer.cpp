@@ -72,9 +72,9 @@ uint64_t read_multibyte(BitstreamUnpacker &b, const std::string &l) {
 const unsigned resolution_table[51][2] = {
     {0, 0},       {360, 200},   {400, 240},   {480, 320},   {640, 360},   {640, 480},   {768, 480},   {800, 600},   {852, 480},
     {854, 480},   {856, 480},   {960, 540},   {960, 640},   {1024, 576},  {1024, 600},  {1024, 768},  {1152, 864},  {1280, 720},
-    {1280, 800},  {1280, 1024}, {1360, 768},  {1366, 768},  {1440, 1050}, {1440, 900},  {1600, 1200}, {1680, 1050}, {1920, 1080},
+    {1280, 800},  {1280, 1024}, {1360, 768},  {1366, 768},  {1400, 1050}, {1440, 900},  {1600, 1200}, {1680, 1050}, {1920, 1080},
     {1920, 1200}, {2048, 1080}, {2048, 1152}, {2048, 1536}, {2160, 1440}, {2560, 1440}, {2560, 1600}, {2560, 2048}, {3200, 1800},
-    {3200, 2048}, {3200, 2400}, {3440, 1440}, {3840, 1600}, {3840, 2160}, {3840, 3072}, {4096, 2160}, {4096, 3072}, {5120, 2880},
+    {3200, 2048}, {3200, 2400}, {3440, 1440}, {3840, 1600}, {3840, 2160}, {3840, 2400}, {4096, 2160}, {4096, 3072}, {5120, 2880},
     {5120, 3200}, {5120, 4096}, {6400, 4096}, {6400, 4800}, {7680, 4320}, {7680, 4800}};
 
 static_assert((sizeof(resolution_table) / sizeof(resolution_table[0])) == 51, "Resolution table is broken");
@@ -1049,6 +1049,18 @@ void Deserializer::parse_additional_info(AdditionalInfo &additional_info, Bitstr
 	if (additional_info.additional_info_type == 0) {
 		additional_info.payload_type = b.u(8, "payload_type");
 		INFO("SeiPayload");
+
+		// V-Nova configuration (user data registered SEI payload) - signals the bitstream version,
+		// as per ISO/IEC 23094-2:2024 Annex E
+		if (additional_info.payload_type == 4) {
+			static const uint8_t itu_header[4] = {0xb4, 0x00, 0x50, 0x00};
+			uint8_t header[4] = {0};
+			for (unsigned i = 0; i < sizeof(header); ++i)
+				header[i] = (uint8_t)b.u(8, "itu_t_t35_country_code");
+			CHECK(memcmp(header, itu_header, sizeof(itu_header)) == 0);
+			additional_info.bitstream_version = b.u(8, "bitstream_version");
+			INFO("V-Nova config - bitstream version %u", additional_info.bitstream_version);
+		}
 	} else if (additional_info.additional_info_type == 1) {
 		INFO("VuiParameters");
 	} else {

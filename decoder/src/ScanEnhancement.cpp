@@ -408,6 +408,78 @@ static size_t scan_enhancement_sei_evc(uint8_t *data, size_t data_size, uint64_t
 	return data_size;
 }
 
+// Find any enhancement data in AV1 metadata OBUs (ITU-T T.35, V-Nova provider code) and pass to
+// callback; the metadata OBUs are removed from the buffer, leaving the base AV1 bitstream.
+//
+static size_t scan_enhancement_av1(uint8_t *data, size_t data_size, uint64_t pts,
+                                   std::function<void(const Packet &pkt, const bool is_lcevc_idr)> callback) {
+	const uint8_t kMetadataTypeItutT35 = 4;
+	static const uint8_t kVNovaItu[4] = {0xb4, 0x00, 0x50, 0x00};
+
+	size_t offset = 0;
+	while (offset + 1 < data_size) {
+		const uint8_t header = data[offset];
+		const uint8_t obu_type = (header >> 3) & 0x0f;
+		const bool has_extension = (header >> 2) & 0x01;
+		const bool has_size = (header >> 1) & 0x01;
+
+		size_t obu_start = offset;
+		size_t pos = offset + 1;
+		if (has_extension)
+			pos += 1;
+
+		uint64_t payload_size = 0;
+		if (has_size) {
+			unsigned i = 0;
+			while (pos < data_size) {
+				const uint8_t s = data[pos++];
+				payload_size |= (uint64_t)(s & 0x7f) << (7 * i);
+				++i;
+				if (!(s & 0x80) || i >= 8)
+					break;
+			}
+		} else {
+			// OBUs without a size field cannot be framed - give up
+			return data_size;
+		}
+
+		if (pos + payload_size > data_size)
+			break;
+
+		// OBU_METADATA (type 5) carrying ITU-T T.35 (metadata_type 1)
+		if (obu_type == 5 && payload_size > 5 && data[pos] == kMetadataTypeItutT35) {
+			const uint8_t *t35 = data + pos + 1;
+			const uint32_t t35_size = (uint32_t)(payload_size - 1);
+
+			if (t35_size > 4 && memcmp(t35, kVNovaItu, sizeof(kVNovaItu)) == 0) {
+				const uint8_t *lcevc = t35 + sizeof(kVNovaItu);
+				// The LCEVC NAL unit is followed by the OBU's trailing bits byte (0x80)
+				const uint32_t lcevc_size = t35_size - (uint32_t)sizeof(kVNovaItu) - 1;
+
+				// The LCEVC data is a complete NAL unit: marker + header + rbsp
+				if (lcevc_size > 5 && is_nal_marker(lcevc) && (lcevc[3] & 0xc0) == 0x40 && lcevc[4] == 0xff) {
+					const unsigned nal_unit_type = (lcevc[3] & 0x3e) >> 1;
+
+					if (is_lcevc_nal_unit_type(nal_unit_type)) {
+						const bool is_idr = (nal_unit_type == NalUnitType::LCEVC_IDR ? true : false);
+						extract_enhancement_nal(lcevc + 5, lcevc_size - 5, true, pts, is_idr, callback);
+
+						// Remove the metadata OBU from the buffer
+						const size_t obu_end = pos + (size_t)payload_size;
+						memmove(data + obu_start, data + obu_end, data_size - obu_end);
+						data_size -= (obu_end - obu_start);
+						continue;
+					}
+				}
+			}
+		}
+
+		offset = pos + (size_t)payload_size;
+	}
+
+	return data_size;
+}
+
 // Scan for enhancement data in buffer - may remove data and returns new size
 //
 size_t scan_enhancement(uint8_t *data, size_t data_size, Encapsulation encapsulation, BaseCoding base_coding, uint64_t pts,
@@ -423,6 +495,8 @@ size_t scan_enhancement(uint8_t *data, size_t data_size, Encapsulation encapsula
 			return scan_enhancement_sei_vvc<RegisteredSEI>(data, data_size, pts, is_base_idr, callback);
 		case BaseCoding_EVC:
 			return scan_enhancement_sei_evc<RegisteredSEI>(data, data_size, pts, is_base_idr, callback);
+		case BaseCoding_AV1:
+			return scan_enhancement_av1(data, data_size, pts, callback);
 		default:
 			CHECK(0);
 		}
@@ -437,6 +511,8 @@ size_t scan_enhancement(uint8_t *data, size_t data_size, Encapsulation encapsula
 			return scan_enhancement_sei_vvc<UnregisteredSEI>(data, data_size, pts, is_base_idr, callback);
 		case BaseCoding_EVC:
 			return scan_enhancement_sei_evc<UnregisteredSEI>(data, data_size, pts, is_base_idr, callback);
+		case BaseCoding_AV1:
+			return scan_enhancement_av1(data, data_size, pts, callback);
 		default:
 			CHECK(0);
 		}
@@ -451,6 +527,8 @@ size_t scan_enhancement(uint8_t *data, size_t data_size, Encapsulation encapsula
 			return scan_enhancement_nal(data, data_size, pts, callback);
 		case BaseCoding_EVC:
 			return scan_enhancement_nal_evc(data, data_size, pts, callback);
+		case BaseCoding_AV1:
+			return scan_enhancement_av1(data, data_size, pts, callback);
 		case BaseCoding_YUV:
 			return scan_enhancement_nal(data, data_size, pts, callback);
 		default:

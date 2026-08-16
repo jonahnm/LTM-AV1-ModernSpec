@@ -56,9 +56,18 @@ YUVWriter::YUVWriter(const std::string &basename, const ImageDescription &image_
 	}
 }
 
+YUVWriter::YUVWriter(FILE *stream, const ImageDescription &image_description)
+    : image_description_(image_description), filename_("<stream>"), stream_(stream) {
+
+	CHECK(stream_ != nullptr);
+}
+
+FILE *YUVWriter::output_stream() const { return stream_ ? stream_ : file_.get(); }
+
 void YUVWriter::update_data(const ImageDescription &image_description) {
 	image_description_ = image_description;
 
+	CHECK(stream_ == nullptr);
 	file_.reset(std::fopen(filename_.c_str(), "wb"));
 
 	if (!file_) {
@@ -68,20 +77,21 @@ void YUVWriter::update_data(const ImageDescription &image_description) {
 
 void YUVWriter::write_surface(const Surface &surface) {
 	auto v = surface.view_as<int8_t>();
+	FILE *f = output_stream();
 
 	if (v.rows_are_contiguous()) {
-		if (std::fwrite(v.data(), v.size(), 1, file_.get()) != 1)
+		if (std::fwrite(v.data(), v.size(), 1, f) != 1)
 			ERR("Cannot write to %s", filename_.c_str());
 	} else {
 		for (unsigned y = 0; y < v.height(); ++y) {
-			if (fwrite(v.data(0, y), v.row_size(), 1, file_.get()) != 1)
+			if (fwrite(v.data(0, y), v.row_size(), 1, f) != 1)
 				ERR("Cannot write to %s", filename_.c_str());
 		}
 	}
 }
 
 void YUVWriter::write(const Image &image) {
-	CHECK(!!file_);
+	CHECK(output_stream() != nullptr);
 
 	if (!(image.description() == image_description_))
 		WARN("WARNING: Output format changed!");
@@ -89,7 +99,7 @@ void YUVWriter::write(const Image &image) {
 	for (unsigned p = 0; p < image_description_.num_planes(); ++p)
 		write_surface(image.plane(p));
 
-	std::fflush(file_.get());
+	std::fflush(output_stream());
 }
 
 void YUVWriter::write(const Surface &surface) {
@@ -97,16 +107,24 @@ void YUVWriter::write(const Surface &surface) {
 
 	write_surface(surface);
 
-	std::fflush(file_.get());
+	std::fflush(output_stream());
 }
 
 void YUVWriter::close() {
-	std::fflush(file_.get());
-	file_.reset(nullptr);
+	if (stream_)
+		std::fflush(stream_);
+	else {
+		std::fflush(file_.get());
+		file_.reset(nullptr);
+	}
 }
 
 std::unique_ptr<YUVWriter> CreateYUVWriter(const std::string &name, const ImageDescription &image_description, bool decorate) {
 	return std::unique_ptr<YUVWriter>(new YUVWriter(name, image_description, decorate));
+}
+
+std::unique_ptr<YUVWriter> CreateYUVWriter(FILE *stream, const ImageDescription &image_description) {
+	return std::unique_ptr<YUVWriter>(new YUVWriter(stream, image_description));
 }
 
 std::unique_ptr<YUVWriter> CreateYUVWriter(const std::string &name) { return std::unique_ptr<YUVWriter>(new YUVWriter(name)); }

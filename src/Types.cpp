@@ -173,6 +173,10 @@ std::istream &operator>>(std::istream &in, BaseCoding &v) {
 		v = BaseCoding_X265;
 	else if (s == "x265")
 		v = BaseCoding_X265;
+	else if (s == "av1")
+		v = BaseCoding_AV1;
+	else if (s == "baseyuv_av1")
+		v = BaseCoding_AV1;
 	else
 		ERR("not a base coding: %s", s.c_str());
 	return in;
