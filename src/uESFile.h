@@ -41,6 +41,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 #define BITSTREAM_BUFFER_SIZE (1024 * 1024)
 

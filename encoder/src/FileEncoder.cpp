@@ -49,6 +49,7 @@
 #include <cstring>
 
 #include <atomic>
+#include <condition_variable>
 #include <fstream>
 #include <iostream>
 #include <list>

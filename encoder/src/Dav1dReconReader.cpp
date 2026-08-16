@@ -41,6 +41,7 @@
 #include "Misc.hpp"
 #include "Surface.hpp"
 
+#include <chrono>
 #include <cstring>
 #include <thread>
 

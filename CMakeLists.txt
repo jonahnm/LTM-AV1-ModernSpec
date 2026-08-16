@@ -192,7 +192,9 @@ list(APPEND ENCODER_SRCS
 
 # libdav1d is used in-process to reconstruct the AV1 base stream in the single-pass path. It is
 # an optional dependency: when not found, the AV1 single-pass streaming path is simply disabled.
+# Resolution order: pkg-config (dav1d.pc), then a DAV1D_ROOT hint, then the standard find paths.
 set(DAV1D_FOUND FALSE)
+
 find_package(PkgConfig QUIET)
 if(PKG_CONFIG_FOUND)
   pkg_check_modules(PC_DAV1D QUIET IMPORTED_TARGET dav1d)
@@ -200,18 +202,28 @@ if(PKG_CONFIG_FOUND)
     set(DAV1D_FOUND TRUE)
   endif()
 endif()
+
 if(NOT DAV1D_FOUND)
-  find_path(DAV1D_INCLUDE_DIR NAMES dav1d/dav1d.h)
-  find_library(DAV1D_LIBRARY NAMES dav1d)
+  if(DEFINED DAV1D_ROOT)
+    set(_dav1d_hints HINTS "${DAV1D_ROOT}/include" "${DAV1D_ROOT}/lib")
+  endif()
+  find_path(DAV1D_INCLUDE_DIR NAMES dav1d/dav1d.h ${_dav1d_hints})
+  find_library(DAV1D_LIBRARY NAMES dav1d ${_dav1d_hints})
   if(DAV1D_INCLUDE_DIR AND DAV1D_LIBRARY)
     set(DAV1D_FOUND TRUE)
   endif()
 endif()
+
 if(DAV1D_FOUND)
-  message(STATUS "Found libdav1d - enabling AV1 single-pass streaming")
+  if(PC_DAV1D_FOUND)
+    message(STATUS "Found libdav1d (${PC_DAV1D_INCLUDEDIR}) - enabling AV1 single-pass streaming")
+  else()
+    message(STATUS "Found libdav1d (${DAV1D_INCLUDE_DIR}) - enabling AV1 single-pass streaming")
+  endif()
   list(APPEND ENCODER_SRCS ${SRC_DIR}/encoder/src/Dav1dReconReader.cpp)
 else()
-  message(STATUS "libdav1d not found - AV1 single-pass streaming disabled (falls back to two-pass with source spooling)")
+  message(WARNING "libdav1d not found - AV1 single-pass streaming disabled (falls back to two-pass with source spooling). "
+                  "Install the dav1d development package and pkg-config, or pass -DDAV1D_ROOT=<prefix> pointing at it.")
 endif()
 
 ### Tests
