@@ -67,7 +67,9 @@ bool ESFile::Reset() {
 	m_decoder = CreateBaseDecoder(m_type);
 	CHECK(!!m_decoder);
 
-	return fseek(m_file, 0, SEEK_SET) == 0;
+	// Seeking fails on non-seekable streams (pipes): this is fine, we only reset right
+	// after opening, when the stream is already at position 0
+	return fseek(m_file, 0, SEEK_SET) == 0 || errno == ESPIPE;
 }
 
 void ESFile::Close() {
@@ -290,10 +292,21 @@ ESFile::Result ESFile::ReadAccessUnitOBU(AccessUnit &out) {
 	int32_t size = 0;
 	bool seen_frame = false;
 
-	while (true) {
-		// Remember start of this OBU so we can rewind on an access unit boundary
-		const long obu_start = ftell(m_file);
+	// A temporal delimiter read at the end of the previous access unit starts the next one
+	// (pipes/FIFOs cannot be rewound, so the delimiter is buffered rather than seeked back)
+	if (!m_pendingFirstNal.empty()) {
+		buffer = std::move(m_pendingFirstNal);
+		m_pendingFirstNal.clear();
+		if (!m_decoder->ParseNalUnit(buffer.data(), (uint32_t)buffer.size()))
+			return NalParsingError;
+		NalUnit unit;
+		unit.m_type = (buffer.empty()) ? 0 : (buffer[0] >> 3) & 0x0f;
+		unit.m_data = std::move(buffer);
+		size += (int32_t)unit.m_data.size();
+		nalUnits.push_back(std::move(unit));
+	}
 
+	while (true) {
 		// Read OBU header byte
 		const int c = fgetc(m_file);
 		if (c == EOF) {
@@ -358,8 +371,7 @@ ESFile::Result ESFile::ReadAccessUnitOBU(AccessUnit &out) {
 
 		// A temporal delimiter ends the current AU (and belongs to the next one)
 		if (obu_type == 2 && seen_frame) {
-			if (fseek(m_file, obu_start, SEEK_SET) != 0)
-				return NalParsingError;
+			m_pendingFirstNal = std::move(buffer);
 
 			out.m_pictureType = m_decoder->GetBasePictureType();
 			out.m_poc = GenerateIncreasingPOC();

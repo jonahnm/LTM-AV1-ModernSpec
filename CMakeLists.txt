@@ -129,6 +129,7 @@ list(APPEND DECODER_SRCS
 list(APPEND ENCODER_SRCS
   ${SRC_DIR}/src/ModelEncoderApp.cpp
   ${SRC_DIR}/encoder/src/FileEncoder.cpp
+  ${SRC_DIR}/encoder/src/Dav1dReconReader.cpp
   ${SRC_DIR}/encoder/src/Encoder.cpp
   ${SRC_DIR}/decoder/src/Add.cpp
   ${SRC_DIR}/decoder/src/Convert.cpp
@@ -189,6 +190,10 @@ list(APPEND ENCODER_SRCS
   ${SRC_DIR}/src/uBaseDecoderYUV.cpp
   ${SRC_DIR}/src/uBaseDecoderAV1.cpp
   ${SRC_DIR}/src/uESFile.cpp  )
+
+# libdav1d is used in-process to reconstruct the AV1 base stream in the single-pass path
+find_library(DAV1D_LIBRARY NAMES dav1d)
+find_path(DAV1D_INCLUDE_DIR NAMES dav1d/dav1d.h)
 
 ### Tests
 ##
@@ -295,6 +300,10 @@ foreach(TARGET ${LCEVC_TARGETS})
 
   # External libraries to link to
   target_link_libraries(${TARGET} ${LCEVC_EXTERNAL_LINK_LIBS} )
+  if(DAV1D_LIBRARY)
+    target_link_libraries(ModelEncoder ${DAV1D_LIBRARY})
+    target_include_directories(ModelEncoder PRIVATE "${DAV1D_INCLUDE_DIR}")
+  endif()
   if(LTM_ENABLE_VVC_PARSER)
     target_link_libraries(${TARGET} BaseVvcMinimumVTM)
   endif()

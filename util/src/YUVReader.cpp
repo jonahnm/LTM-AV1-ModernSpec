@@ -128,6 +128,22 @@ void YUVReader::set_position(unsigned position) const {
 	}
 }
 
+// True when a sequential input is exhausted - peeks a byte and pushes it back, so it must only
+// be called between frames (it is not valid in the middle of a frame)
+//
+bool YUVReader::eof() const {
+	if (!sequential_)
+		return false;
+
+	FILE *f = input_stream();
+	const int c = fgetc(f);
+	if (c == EOF)
+		return true;
+
+	CHECK(ungetc(c, f) == c);
+	return false;
+}
+
 // Read bytes from the input, replaying any bytes consumed during format sniffing first (this
 // only ever applies to the start of frame 0 on a non-seekable pipe)
 //

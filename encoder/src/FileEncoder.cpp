@@ -38,6 +38,7 @@
 //
 
 #include "FileEncoder.hpp"
+#include "Dav1dReconReader.hpp"
 
 #include <cinttypes>
 #include <cstdint>
@@ -58,6 +59,7 @@
 #include <cassert>
 
 #if !defined(_WIN32)
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -194,6 +196,22 @@ protected:
 
 	unsigned intra_period() const;
 
+	// Single-pass streaming - encode the source in one pass, with the base encoder and decoder
+	// running in lockstep through FIFOs so that no source spooling is needed and the frame
+	// count does not need to be known in advance. Only implementations whose base stream is in
+	// display order (AV1) and can run through FIFOs support this.
+	//
+	virtual bool single_pass_available() const { return false; }
+	virtual string single_pass_base_encoder_command(const string &input_fifo, const string &es_fifo) const {
+		ERR("Single-pass streaming is not supported with this base encoder.");
+		return "";
+	}
+
+	void encode_file_single_pass(YUVReader &src_file, const string &dst_filename, const string &dst_filename_yuv,
+	                             unsigned limit);
+	void encode_single_pass(YUVReader &src_file, Dav1dReconReader &recon_reader, FILE *output_file, ESFile &es_file,
+	                        const string &dst_filename_yuv, unsigned limit, FILE *svt_input);
+
 	virtual bool run_base_encoder(const string &input, const string &stream_output, const string &recon_output,
 	                              unsigned frame_count) const = 0;
 	virtual bool run_base_decoder(const string &input, const string &output) = 0;
@@ -276,6 +294,15 @@ void FileEncoderImpl::encode_file(const string &src_filename, const string &dst_
 	// Read source and downsample into base
 	//
 	unique_ptr<YUVReader> src_file(CHECK(CreateYUVReader(src_filename, encoder_.src_image_description(), fps_)));
+
+	// A sequential source is encoded single-pass when the base codec can run in lockstep
+	// through FIFOs - the source is then read exactly once with no spooling and no need to
+	// know the frame count in advance
+	//
+	if (src_file->sequential() && single_pass_available()) {
+		encode_file_single_pass(*src_file, dst_filename, dst_filename_yuv, limit);
+		return;
+	}
 
 	// A pipe/FIFO source can only be read once, but the enhancement pass needs to re-read the
 	// source. Spool a sequential source to a temporary regular file up front so the rest of the
@@ -385,6 +412,313 @@ void FileEncoderImpl::encode_file(const string &src_filename, const string &dst_
 	}
 	if (!src_spool_filename.empty())
 		::remove(src_spool_filename.c_str());
+}
+
+// Single-pass streaming encode: the source is consumed once and the enhancement for each frame
+// is produced as soon as its base AU is available, so neither a source spool nor a known frame
+// count is required. The base encoder reads its input from a FIFO we write, writes its stream
+// through a pipe we parse in transit (recovered via /dev/fd on the popen pipe), and the base
+// decoder reconstructs it in-process with libdav1d, so no seekable intermediate is created.
+//
+static BaseFrameType frame_type(BaseDecPictType::Enum pt);
+template <typename T, typename... Args> std::unique_ptr<T> make_unique(Args &&...args);
+void FileEncoderImpl::encode_file_single_pass(YUVReader &src_file, const string &dst_filename, const string &dst_filename_yuv,
+                                              unsigned limit) {
+#if defined(_WIN32)
+	ERR("Single-pass streaming is not supported on Windows.");
+#else
+	if (parameters_["keep_base"].get<bool>(false))
+		ERR("--keep_base is not supported with single-pass streaming (the base stream exists only in transit).");
+
+	INFO("Using single-pass streaming - no source spooling, no frame count required");
+
+	const string svt_in_fifo = make_temporary_filename("_svt_in.fifo");
+	CHECK(mkfifo(svt_in_fifo.c_str(), 0600) == 0);
+
+	// Spawn the base encoder first. Its input is a FIFO we open next (the child blocks in its
+	// input open until the write end is opened); its output goes to its standard output so no
+	// second open is needed - the base encoders only open their output once the first frame is
+	// ready, which would deadlock a FIFO open here. The stream is then read via /dev/fd on the
+	// pipe the shell built for us. Spawning the decoder happens before opening any FIFO write
+	// ends so no child inherits them and keeps them from reaching EOF.
+	const string svt_cmd = single_pass_base_encoder_command(svt_in_fifo, "/dev/stdout");
+	FILE *svt_proc = LCEVC_POPEN(svt_cmd.c_str(), "r");
+	CHECK(svt_proc);
+	INFO("Running: %s", svt_cmd.c_str());
+
+	UniquePtrFile svt_input(CHECK(fopen(svt_in_fifo.c_str(), "wb")));
+
+	ESFile es_file;
+	char es_fd_path[32];
+	snprintf(es_fd_path, sizeof(es_fd_path), "/dev/fd/%d", fileno(svt_proc));
+	CHECK(es_file.Open(es_fd_path, es_file_type()));
+
+	Dav1dReconReader recon_reader(encoder_.base_image_description());
+
+	UniquePtrFile output_file(open_es_output(dst_filename));
+
+	clock_t EnhaClock1 = clock();
+	encode_single_pass(src_file, recon_reader, output_file.get(), es_file, dst_filename_yuv, limit, svt_input.get());
+	clock_t EnhaClock2 = clock();
+
+	INFO("**** Encode enhancement. delta. %16d secs", (EnhaClock2 - EnhaClock1) / CLOCKS_PER_SEC);
+
+	// The feeder thread owns closing the base encoder's input once the source is exhausted;
+	// it then drains its look-ahead, writes out its buffered frames and exits. Drain the tail
+	// of the stream before closing the process.
+	while (true) {
+		ESFile::AccessUnit au;
+		if (!read_au(es_file, au))
+			break;
+	}
+	es_file.Close();
+
+	LCEVC_PCLOSE(svt_proc);
+	::remove(svt_in_fifo.c_str());
+#endif
+}
+
+// Feed the base encoder, forward its AUs to the base decoder, and encode the enhancement for
+// each frame in a single pass - see encode_file_single_pass
+//
+void FileEncoderImpl::encode_single_pass(YUVReader &src_file, Dav1dReconReader &recon_reader, FILE *output_file, ESFile &es_file,
+                                         const string &dst_filename_yuv, unsigned limit, FILE *svt_input) {
+	deque<ESFile::AccessUnit> pending;
+
+	unsigned display_frame = 0;
+	unsigned written_count = 0;
+	bool end_of_es = false;
+	encoder_.set_last_idr_frame_num(0);
+	std::vector<std::unique_ptr<Image>> src;
+	const bool level1_depth_flag = encoder_.level1_depth_flag();
+
+	// The base encoder needs its whole look-ahead window before it emits its first frame, so the
+	// source is read by a feeder thread that downsamples into the base encoder's input while the
+	// main loop drains the base stream. Expanded source frames are forwarded through a queue so
+	// the enhancement pass sees the same frames that were fed to the base encoder - the source is
+	// read exactly once.
+	//
+	std::atomic<bool> stop_feeding(false);
+	std::mutex src_mutex;
+	std::condition_variable src_cv;
+	std::deque<Image> src_queue;
+	bool src_done = false;
+
+	std::thread feeder([&]() {
+		unique_ptr<YUVWriter> base_yuv(CreateYUVWriter(svt_input, encoder_.base_image_description()));
+		unsigned f = 0;
+		while (!stop_feeding) {
+			// The eof probe may block until the producer feeds the pipe or closes it
+			if (src_file.eof()) {
+				INFO("Single-pass: source finished after %u frames", f);
+				break;
+			}
+
+			const Image frame = ExpandImage(src_file.read(f, f), encoder_.enhancement_image_description());
+			{
+				std::lock_guard<std::mutex> lk(src_mutex);
+				src_queue.push_back(frame);
+			}
+			src_cv.notify_all();
+
+			const Image img = DownsampleImage(DownsampleImage(frame, downsample_luma_, downsample_chroma_,
+			                                                  scaling_mode_[LOQ_LEVEL_2],
+			                                                  level1_depth_flag ? 0 : encoder_.base_image_description().bit_depth()),
+			                                  downsample_luma_, downsample_chroma_, scaling_mode_[LOQ_LEVEL_1],
+			                                  level1_depth_flag ? encoder_.base_image_description().bit_depth() : 0);
+
+			// Blocks when the base encoder's look-ahead is full - paced by the base encoder
+			INFO("Writing base %u", f);
+			base_yuv->write(img);
+			++f;
+		}
+		// Closing the input lets the base encoder drain its look-ahead and finish
+		std::fclose(svt_input);
+		{
+			std::lock_guard<std::mutex> lk(src_mutex);
+			src_done = true;
+		}
+		src_cv.notify_all();
+	});
+
+	// Take a frame from the source queue, waiting for the next expanded source frame to arrive
+	//
+	auto next_source_frame = [&]() -> Image {
+		std::unique_lock<std::mutex> lk(src_mutex);
+		src_cv.wait(lk, [&]() { return !src_queue.empty() || src_done; });
+		if (src_queue.empty())
+			return Image();
+		Image frame = std::move(src_queue.front());
+		src_queue.pop_front();
+		return frame;
+	};
+
+	// Frame 0 must be present to establish the encoder configuration
+	Image first_frame = next_source_frame();
+	if (first_frame.empty())
+		ERR("Frames cannot be read from source.");
+	src.push_back(make_unique<Image>(first_frame));
+	encoder_.initialise_config(parameters_, src);
+
+	int64_t pts = 0;
+	int64_t duration = 90000L / fps_;
+
+	while (written_count < limit && !end_of_es) {
+
+		// Get next AU from the base stream (blocks until the base encoder has produced it),
+		// and forward it to the base decoder so its reconstruction becomes available
+		ESFile::AccessUnit au;
+		if (read_au(es_file, au)) {
+			pending.push_front(au);
+			for (const auto &n : au.m_nalUnits)
+				recon_reader.feed(n.m_data.data(), n.m_data.size());
+		} else {
+			end_of_es = true;
+		}
+
+		// Advance 'enhancement_poc' past AUs that are present in queue, adding enhancement as needed
+		bool keep_looking = false;
+		do {
+			keep_looking = false;
+			for (auto &a : pending) {
+
+				// AVC POCs are increased by 2 XXX move to virtual fn
+				const unsigned enhance_poc = (es_file_type() == BaseDecoder::AVC) ? 2 * display_frame : display_frame;
+
+				if (a.m_poc == enhance_poc) {
+
+					// Keep the current and next source frame in the window; when the source is
+					// exhausted, the remaining base frames are written through un-enhanced
+					while (src.size() <= display_frame + 1) {
+						Image next_frame = next_source_frame();
+						if (next_frame.empty())
+							break;
+						src.push_back(make_unique<Image>(next_frame));
+					}
+
+					if (src.empty()) {
+						// No more source frames - write this AU through verbatim
+						for (const auto &n : a.m_nalUnits) {
+							size_t sz = n.m_data.size();
+							CHECK(fwrite(n.m_data.data(), 1, sz, output_file) == sz);
+						}
+						++written_count;
+						display_frame++;
+						continue;
+					}
+
+					if (display_frame != 0)
+						src.erase(src.begin());
+
+					const Image recon = recon_reader.read(display_frame, display_frame);
+
+					const Image src_intermediate =
+					    DownsampleImage(*src[0], downsample_luma_, downsample_chroma_, scaling_mode_[LOQ_LEVEL_2],
+					                    encoder_.intermediate_image_description().bit_depth());
+
+					// Enhancement encoding
+					const bool is_idr = a.m_pictureType == BaseDecPictType::IDR;
+					Packet pss = encoder_.encode(src, src_intermediate, recon, frame_type(a.m_pictureType), is_idr, display_frame,
+					                             dst_filename_yuv);
+
+					goReportStructure.miTimeStamp = (int)a.m_poc;
+					goReportStructure.miPictureType = (int)a.m_pictureType;
+					goReportStructure.miBaseSize = (int)a.m_size;
+					if (!pss.empty())
+						goReportStructure.miEnhancementSize = add_enhancement(a, is_idr, pss);
+					goReportQueue.push(goReportStructure);
+					goPsnr.miBaseBytes += goReportStructure.miBaseSize;
+					goPsnr.miEnhancementBytes += goReportStructure.miEnhancementSize;
+
+					// clang-format off
+					fprintf(stdout, "ENC. [pts. %4d] [type %4d] [base %8d] [enha %8d] ",
+						goReportStructure.miTimeStamp, goReportStructure.miPictureType, goReportStructure.miBaseSize, goReportStructure.miEnhancementSize);
+					fflush(stdout);
+					fprintf(stdout, "[psnrY %8.4f] ", goPsnr.mfCurPsnr[0]);
+					if (encoder_.src_image_description().num_planes() > 1)
+						fprintf(stdout, "[psnrU %8.4f] [psnrV %8.4f] \n", (goPsnr.mfCurPsnr[1]), (goPsnr.mfCurPsnr[2]));
+					else
+						fprintf(stdout, "\n");
+					fflush(stdout);
+					fprintf(stdout, "[MD5Y %02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X] ", 
+						gaucMd5Digest[0][0],  gaucMd5Digest[0][1],  gaucMd5Digest[0][2],  gaucMd5Digest[0][3],  
+						gaucMd5Digest[0][4],  gaucMd5Digest[0][5],  gaucMd5Digest[0][6],  gaucMd5Digest[0][7],  
+						gaucMd5Digest[0][8],  gaucMd5Digest[0][9],  gaucMd5Digest[0][10], gaucMd5Digest[0][11], 
+						gaucMd5Digest[0][12], gaucMd5Digest[0][13], gaucMd5Digest[0][14], gaucMd5Digest[0][15]);
+					fflush(stdout);
+					if (encoder_.src_image_description().num_planes() > 1) {
+						fprintf(stdout, "[MD5U %02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X] ", 
+							gaucMd5Digest[1][0],  gaucMd5Digest[1][1],  gaucMd5Digest[1][2],  gaucMd5Digest[1][3],  
+							gaucMd5Digest[1][4],  gaucMd5Digest[1][5],  gaucMd5Digest[1][6],  gaucMd5Digest[1][7],  
+							gaucMd5Digest[1][8],  gaucMd5Digest[1][9],  gaucMd5Digest[1][10], gaucMd5Digest[1][11], 
+							gaucMd5Digest[1][12], gaucMd5Digest[1][13], gaucMd5Digest[1][14], gaucMd5Digest[1][15]);
+						fflush(stdout);
+						fprintf(stdout, "[MD5V %02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X] \n", 
+							gaucMd5Digest[2][0],  gaucMd5Digest[2][1],  gaucMd5Digest[2][2],  gaucMd5Digest[2][3],  
+							gaucMd5Digest[2][4],  gaucMd5Digest[2][5],  gaucMd5Digest[2][6],  gaucMd5Digest[2][7],  
+							gaucMd5Digest[2][8],  gaucMd5Digest[2][9],  gaucMd5Digest[2][10], gaucMd5Digest[2][11], 
+							gaucMd5Digest[2][12], gaucMd5Digest[2][13], gaucMd5Digest[2][14], gaucMd5Digest[2][15]);
+						fflush(stdout);
+					} else {
+						fprintf(stdout, "\n");
+						fflush(stdout);
+					}
+					// clang-format on
+
+					display_frame++;
+					keep_looking = true;
+
+					// INFO("base -- %4u %8u %4u", display_frame, pss.size(), a.m_pictureType);
+					break;
+				}
+			}
+		} while (keep_looking);
+
+		// Consume AUs that have been enhanced from the back of queue and write to output stream
+		const unsigned write_poc = (es_file_type() == BaseDecoder::AVC) ? 2 * display_frame : display_frame;
+		while (!pending.empty() && (pending.back().m_poc < write_poc)) {
+			for (const auto &n : pending.back().m_nalUnits) {
+				size_t sz = n.m_data.size();
+				// INFO("lvc  -- %4u %8u", written_count, sz);
+				CHECK(fwrite(n.m_data.data(), 1, sz, output_file) == sz);
+			}
+			pending.pop_back();
+			++written_count;
+		}
+	}
+
+	// Stop the feeder and drain the base encoder's tail: the feeder's input FIFO closes as the
+	// source is exhausted, and its in-flight writes unblock as the tail drains, so joining after
+	// the drain does not deadlock
+	stop_feeding = true;
+	while (true) {
+		ESFile::AccessUnit au;
+		if (!read_au(es_file, au))
+			break;
+	}
+	feeder.join();
+
+	if (written_count > 0) {
+		int iFrames = written_count;
+
+		float fAccMse[MAX_NUM_PLANES];
+		float fPsnr[MAX_NUM_PLANES];
+		for (unsigned plane = 0; plane < encoder_.src_image_description().num_planes(); plane++) {
+			fAccMse[plane] = goPsnr.mfAccMse[plane] / iFrames;
+			fPsnr[plane] = (float)(10.0f * log10((32767.0f * 32767.0f) / fAccMse[plane]));
+		}
+
+		REPORT("========= ========= ========= ========= ========= ========= ========= ========= ");
+		if (encoder_.src_image_description().num_planes() > 1)
+			REPORT("PSNR -- YUV %8.4f -- Y %8.4f U %8.4f V %8.4f", (6 * fPsnr[0] + fPsnr[1] + fPsnr[2]) / 8, fPsnr[0], fPsnr[1],
+			       fPsnr[2]);
+		else
+			REPORT("PSNR -- Y %8.4f", fPsnr[0]);
+		REPORT("========= ========= ========= ========= ========= ========= ========= ========= ");
+		REPORT("BITS -- base %8d bps -- enha %8d bps ", (goPsnr.miBaseBytes * 8 * this->fps_) / iFrames,
+		       (goPsnr.miEnhancementBytes * 8 * this->fps_) / iFrames);
+		REPORT("========= ========= ========= ========= ========= ========= ========= ========= ");
+	}
 }
 
 void FileEncoderImpl::encode_file_with_decoder(const string &src_filename, const string base_filename, const string &dst_filename,
@@ -1372,6 +1706,31 @@ public:
 	// Stream the base YUV into the base encoder and the base recon back out, so that no
 	// full-size raw YUV files are written to disk
 	bool streams_base_io() const override { return true; }
+
+	// Single-pass streaming can run the AV1 base encoder/decoder pair in lockstep through FIFOs
+	// with an unknown frame count (the AV1 stream is in display order, so per-AU enhancement is
+	// produced as soon as the AU itself arrives)
+	bool single_pass_available() const override { return true; }
+
+	// The single-pass base encoder reads its input from one FIFO and writes its stream to
+	// another, and encodes until its input ends (-n 0) because the frame count is not known
+	//
+	string single_pass_base_encoder_command(const string &input_fifo, const string &es_fifo) const override {
+		if (encoder_.base_image_description().colourspace() != Colourspace_YUV420)
+			ERR("Only encodings with a 4:2:0 colourspace are supported by SVT-AV1.");
+		if (encoder_.base_image_description().bit_depth() != Bitdepth_8 &&
+		    encoder_.base_image_description().bit_depth() != Bitdepth_10)
+			ERR("SVT-AV1 supports 8-bit and 10-bit inputs only.");
+
+		const string prog = codec_executable("SVT-AV1/SvtAv1EncApp");
+		const unsigned qp = encoder_.base_qp();
+
+		return format("%s -i %s -w %d -h %d --fps-num %d --fps-denom 1 --input-depth %d --qp %d --preset 8 "
+		              "--pred-struct 1 --enable-tf 0 --keyint %d -n 0 --obu -b %s --progress 0",
+		              prog.c_str(), input_fifo.c_str(), encoder_.base_image_description().width(),
+		              encoder_.base_image_description().height(), fps_, encoder_.base_image_description().bit_depth(), qp,
+		              intra_period(), es_fifo.c_str());
+	}
 
 	// Start SVT-AV1 reading the downsampled base YUV from stdin - returns a pipe to write into
 	//

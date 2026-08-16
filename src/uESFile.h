@@ -123,6 +123,10 @@ private:
 	// Offset for POCs from decoder to keep them increasing across IDRs
 	int64_t m_poc_offset;
 
+	// Temporal delimiter that was read at the end of the previous AU - kept here because a
+	// pipe/FIFO input cannot be rewound; it is used to start the next AU instead
+	std::vector<unsigned char> m_pendingFirstNal;
+
 	unsigned char * mpucBuffer;
 	int miBufferFullness;
 	int miBufferPointer;

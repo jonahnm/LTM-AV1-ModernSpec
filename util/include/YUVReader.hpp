@@ -61,6 +61,10 @@ public:
 	// never re-read (seekable inputs return false)
 	bool sequential() const { return sequential_; }
 
+	// True when a sequential input has been exhausted - peek only, safe to call between frames;
+	// always false for seekable inputs (whose length is known)
+	bool eof() const;
+
 	// Read into Image
 	Image read(unsigned position, uint64_t timestamp = 0) const;
 	void update_data(const ImageDescription &image_description);
