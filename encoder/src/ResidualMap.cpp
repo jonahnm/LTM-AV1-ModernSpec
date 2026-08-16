@@ -37,6 +37,7 @@
 // Process used kill coefficients depending on preprocessed residual map
 //
 
+#include <cstdint>
 #include "ResidualMap.hpp"
 #include "Misc.hpp"
 #include "TemporalDecode.hpp"

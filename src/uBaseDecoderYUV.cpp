@@ -33,6 +33,8 @@
 //
 // Contributors: Florian Maurer (florian.maurer@v-nova.com)
 
+#include <limits>
+#include <cstdint>
 #include <cstring>
 
 #include "uBaseDecoderYUV.h"

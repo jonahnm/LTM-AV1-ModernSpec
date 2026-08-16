@@ -35,6 +35,7 @@
 // Subtract.cpp
 //
 
+#include <cstdint>
 #include "Subtract.hpp"
 
 namespace lctm {

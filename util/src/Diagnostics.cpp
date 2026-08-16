@@ -35,6 +35,7 @@
 //
 // Old school sprintf into a std::string
 //
+#include <cstdint>
 #include "Diagnostics.hpp"
 
 #include <cstdarg>

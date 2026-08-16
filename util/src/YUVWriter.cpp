@@ -35,6 +35,7 @@
 //
 // YUVWriter.cpp
 //
+#include <cstdint>
 #include "YUVWriter.hpp"
 
 namespace lctm {

@@ -35,6 +35,7 @@
 // HuffmanEncoder.cpp
 //
 
+#include <cstdint>
 #include "HuffmanEncoder.hpp"
 
 #include "Diagnostics.hpp"

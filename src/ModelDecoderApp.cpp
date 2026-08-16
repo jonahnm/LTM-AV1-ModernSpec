@@ -36,6 +36,7 @@
 // Model Decoder
 //
 
+#include <cstdint>
 #include <cstdio>
 
 #include <cxxopts.hpp>

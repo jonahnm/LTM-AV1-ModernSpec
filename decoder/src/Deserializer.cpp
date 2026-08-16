@@ -36,6 +36,7 @@
 // Deserializer.cpp
 //
 
+#include <cstdint>
 #include "Deserializer.hpp"
 
 #include "BitstreamUnpacker.hpp"

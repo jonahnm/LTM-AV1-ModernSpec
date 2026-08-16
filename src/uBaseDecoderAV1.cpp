@@ -31,6 +31,7 @@
 // THE POSSIBILITY OF SUCH DAMAGE.
 //
 
+#include <cstdint>
 #include "uBaseDecoderAV1.h"
 
 #include "Diagnostics.hpp"

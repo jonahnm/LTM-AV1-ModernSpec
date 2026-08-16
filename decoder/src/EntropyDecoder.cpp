@@ -35,6 +35,7 @@
 // EntropyDecoder.cpp
 //
 
+#include <cstdint>
 #include "EntropyDecoder.hpp"
 
 #include "BitstreamUnpacker.hpp"

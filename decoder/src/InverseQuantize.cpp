@@ -36,6 +36,7 @@
 // InverseQuantize.cpp
 //
 
+#include <cstdint>
 #include "InverseQuantize.hpp"
 
 #include <cmath>

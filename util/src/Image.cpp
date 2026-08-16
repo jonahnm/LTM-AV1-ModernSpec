@@ -35,6 +35,7 @@
 //
 // Image.cpp
 //
+#include <cstdint>
 #include "Image.hpp"
 #include "Diagnostics.hpp"
 #include "Misc.hpp"

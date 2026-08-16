@@ -35,6 +35,7 @@
 // Exnpand.cpp
 //
 
+#include <cstdint>
 #include "Expand.hpp"
 #include "Misc.hpp"
 

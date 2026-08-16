@@ -36,6 +36,7 @@
 //               Lorenzo Ciccarelli (lorenzo.ciccarelli@v-nova.com)
 //
 
+#include <cstdint>
 #include "ParameterDefaults.hpp"
 #include "Types.hpp"
 

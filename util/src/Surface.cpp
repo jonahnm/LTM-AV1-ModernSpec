@@ -37,6 +37,7 @@
 //
 // NB: Most all this implementation is templated on data type in SurfaceImpl.hpp
 //
+#include <cstdint>
 #include "Surface.hpp"
 #include "Convert.hpp"
 #include "Diagnostics.hpp"

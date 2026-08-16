@@ -42,6 +42,7 @@
 // The users of this will make read/write intentions clear using map/unmap, so there
 // is the means to store the data in some other mappable store.
 //
+#include <cstdint>
 #include "Buffer.hpp"
 
 #include "Diagnostics.hpp"

@@ -37,6 +37,7 @@
 //
 
 #if defined(_WIN32)
+#include <cstdint>
 #include <Windows.h>
 #endif
 

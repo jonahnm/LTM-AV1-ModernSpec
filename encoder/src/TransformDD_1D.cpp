@@ -35,6 +35,7 @@
 // TransformDD_1D.cpp
 //
 
+#include <cstdint>
 #include "TransformDD_1D.hpp"
 #include "Config.hpp"
 

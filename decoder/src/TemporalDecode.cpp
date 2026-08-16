@@ -36,6 +36,7 @@
 // TemporalRefresh.cpp
 //
 
+#include <cstdint>
 #include "TemporalDecode.hpp"
 #include "Misc.hpp"
 

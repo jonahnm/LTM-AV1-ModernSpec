@@ -38,6 +38,7 @@
 // Decoder implementation - marshals other objects to decode base+enhancement to YUV image
 //
 
+#include <cstdint>
 #include "Decoder.hpp"
 
 #include "Add.hpp"

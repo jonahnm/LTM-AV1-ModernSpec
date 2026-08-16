@@ -34,6 +34,7 @@
 // Contributors: Sam Littlewood (sam.littlewood@v-nova.com)
 //
 
+#include <cstdint>
 #include "Codec.hpp"
 
 #include <memory>

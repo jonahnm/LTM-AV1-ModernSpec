@@ -38,6 +38,7 @@
 // Encoder.cpp
 //
 
+#include <cstdint>
 #include "Encoder.hpp"
 
 #include "Convert.hpp"

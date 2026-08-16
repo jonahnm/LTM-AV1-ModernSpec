@@ -37,6 +37,7 @@
 // Processes used to generate the various temporal refresh signals (per frame, per tile, per block)
 //
 
+#include <cstdint>
 #include "TemporalEncode.hpp"
 
 #include "Misc.hpp"

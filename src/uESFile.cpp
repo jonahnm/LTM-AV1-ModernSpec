@@ -31,6 +31,7 @@
 // THE POSSIBILITY OF SUCH DAMAGE.
 //
 
+#include <cstdint>
 #include "uESFile.h"
 #include "Diagnostics.hpp"
 

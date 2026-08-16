@@ -38,6 +38,7 @@
 //
 //
 
+#include <cstdint>
 #include "BitstreamStatistic.hpp"
 
 #include "Diagnostics.hpp"

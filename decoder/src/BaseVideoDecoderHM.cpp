@@ -37,6 +37,7 @@
 //
 // Base decoder implementation using HM Test Model
 //
+#include <cstdint>
 #include "BaseVideoDecoder.hpp"
 
 #include <queue>

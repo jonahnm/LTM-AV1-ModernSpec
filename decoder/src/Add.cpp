@@ -36,6 +36,7 @@
 // Add.cpp
 //
 
+#include <cstdint>
 #include "Add.hpp"
 #include "Config.hpp"
 

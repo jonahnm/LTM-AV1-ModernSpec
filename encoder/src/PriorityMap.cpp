@@ -39,6 +39,8 @@
 // Generate a map indicating which residuals should be kept/killed
 //
 
+#include <limits>
+#include <cstdint>
 #include "PriorityMap.hpp"
 #include "Misc.hpp"
 #include "Types.hpp"

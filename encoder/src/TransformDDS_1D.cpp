@@ -35,6 +35,7 @@
 // TransformDDS_1D.cpp
 //
 
+#include <cstdint>
 #include "TransformDDS_1D.hpp"
 #include "Config.hpp"
 

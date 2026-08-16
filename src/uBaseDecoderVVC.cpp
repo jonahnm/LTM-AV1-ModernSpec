@@ -31,6 +31,7 @@
 // THE POSSIBILITY OF SUCH DAMAGE.
 //
 
+#include <cstdint>
 #include <algorithm>
 #include <assert.h>
 #include <climits>

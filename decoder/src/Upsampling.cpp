@@ -35,6 +35,7 @@
 // Upsampling.cpp
 //
 
+#include <cstdint>
 #include "Upsampling.hpp"
 
 #include "Convert.hpp"

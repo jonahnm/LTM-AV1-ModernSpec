@@ -35,6 +35,7 @@
 // Downsampling.cpp
 //
 
+#include <cstdint>
 #include "Downsampling.hpp"
 #include "Convert.hpp"
 #include "Misc.hpp"

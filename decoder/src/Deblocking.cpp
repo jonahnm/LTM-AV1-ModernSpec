@@ -35,6 +35,7 @@
 // Deblocking.cpp
 //
 
+#include <cstdint>
 #include "Deblocking.hpp"
 
 namespace lctm {

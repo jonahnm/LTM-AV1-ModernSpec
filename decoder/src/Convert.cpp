@@ -36,6 +36,7 @@
 // Convert.cpp
 //
 
+#include <cstdint>
 #include "Convert.hpp"
 #include "Config.hpp"
 #include "Misc.hpp"

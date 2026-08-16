@@ -35,6 +35,7 @@
 //
 //// Packet.cpp
 //
+#include <cstdint>
 #include "Packet.hpp"
 
 #include "Diagnostics.hpp"

@@ -35,6 +35,7 @@
 // Compare.cpp
 //
 
+#include <cstdint>
 #include "Compare.hpp"
 #include "ResidualMap.hpp"
 #include "TemporalDecode.hpp"

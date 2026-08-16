@@ -37,6 +37,7 @@
 //
 // Base decoder implementation using JM Test Model
 //
+#include <cstdint>
 #include "BaseVideoDecoder.hpp"
 
 #include <queue>

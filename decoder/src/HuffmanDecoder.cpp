@@ -35,6 +35,7 @@
 // HuffmanDecoder.cpp
 //
 
+#include <cstdint>
 #include "HuffmanDecoder.hpp"
 
 #include "Config.hpp"

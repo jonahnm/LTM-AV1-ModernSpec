@@ -36,6 +36,7 @@
 // Dithering.cpp
 //
 
+#include <cstdint>
 #include "Dithering.hpp"
 
 #include <time.h>

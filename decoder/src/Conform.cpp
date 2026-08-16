@@ -33,6 +33,7 @@
 // Contributors: Sam Littlewood (sam.littlewood@v-nova.com)
 //
 
+#include <cstdint>
 #include "Conform.hpp"
 
 namespace lctm {

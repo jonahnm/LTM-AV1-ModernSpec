@@ -35,6 +35,7 @@
 // Crop.cpp
 //
 
+#include <cstdint>
 #include "Crop.hpp"
 
 namespace lctm {

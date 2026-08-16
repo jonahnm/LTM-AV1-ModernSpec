@@ -40,6 +40,7 @@
 // Use macro: BITSTREAM_DEBUG - define to !0 to get debug spew of bitfield operations
 //
 
+#include <cstdint>
 #include "BitstreamPacker.hpp"
 
 #include "Diagnostics.hpp"

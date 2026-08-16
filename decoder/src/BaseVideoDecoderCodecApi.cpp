@@ -37,6 +37,7 @@
 //
 // Base decoder wrapper using utils/include/CodecApi.h to talk to loadable codecs.
 //
+#include <cstdint>
 #include "BaseVideoDecoderCodecApi.hpp"
 
 #include <queue>

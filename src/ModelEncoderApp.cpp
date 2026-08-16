@@ -37,6 +37,7 @@
 // ModelEncoderApp.cpp
 //
 //
+#include <cstdint>
 #include <algorithm>
 #include <cinttypes>
 #include <cstdio>

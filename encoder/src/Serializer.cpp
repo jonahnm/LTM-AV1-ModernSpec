@@ -36,6 +36,7 @@
 // Serializer.cpp
 //
 
+#include <cstdint>
 #include "Serializer.hpp"
 
 #include "BitstreamPacker.hpp"

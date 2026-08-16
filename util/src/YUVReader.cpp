@@ -37,6 +37,7 @@
 //
 // Read raw YUV video files
 //
+#include <cstdint>
 #include "YUVReader.hpp"
 
 #include <cstdio>

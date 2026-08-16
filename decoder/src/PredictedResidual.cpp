@@ -36,6 +36,7 @@
 // PredictedResidual.cpp
 //
 
+#include <cstdint>
 #include "PredictedResidual.hpp"
 #include "Misc.hpp"
 

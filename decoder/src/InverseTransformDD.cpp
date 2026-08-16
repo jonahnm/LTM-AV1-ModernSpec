@@ -35,6 +35,7 @@
 // InverseTransformDD.cpp
 //
 
+#include <cstdint>
 #include "InverseTransformDD.hpp"
 
 namespace lctm {

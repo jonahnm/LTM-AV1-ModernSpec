@@ -36,6 +36,7 @@
 // Quantize.cpp
 //
 
+#include <cstdint>
 #include <algorithm>
 
 #include "Misc.hpp"
