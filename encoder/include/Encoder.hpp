@@ -69,6 +69,10 @@ public:
 	Encoder(const ImageDescription &image_description, const Parameters &parameters);
 	void initialise_config(const Parameters &parameters, std::vector<std::unique_ptr<Image>> &src_image);
 
+	// Adopt a source description discovered after construction (e.g. the YUV4MPEG2 header read
+	// from a pipe/FIFO) - rebuilds the global configuration and derived image descriptions
+	void update_source_description(const ImageDescription &image_description, const Parameters &parameters);
+
 	const Dimensions &dimensions() const { return dimensions_; }
 
 	Packet encode(std::vector<std::unique_ptr<Image>> &src, const Image &intermediate_src, const Image &base_recon,

@@ -125,6 +125,25 @@ Encoder::Encoder(const ImageDescription &image_description, const Parameters &pa
 	    ImageDescription(image_description.format(), dimensions_.conformant_width(), dimensions_.conformant_height());
 }
 
+// Adopt a source description discovered after construction (e.g. the YUV4MPEG2 header read from
+// a pipe/FIFO): rebuild the global configuration and the derived image descriptions.
+//
+void Encoder::update_source_description(const ImageDescription &image_description, const Parameters &parameters) {
+	memset(&configuration_, 0, sizeof(configuration_));
+
+	Parameters defaults = parameter_defaults_global(parameters);
+	update_global_configuration(parameters, defaults, image_description);
+
+	src_image_description_ = image_description;
+	base_image_description_ = ImageDescription(image_description.format(), dimensions_.base_width(), dimensions_.base_height())
+	                              .with_depth(configuration_.global_configuration.base_depth);
+	intermediate_image_description_ = ImageDescription(
+	    configuration_.global_configuration.level1_depth_flag ? src_image_description_.format() : base_image_description_.format(),
+	    dimensions_.intermediate_width(), dimensions_.intermediate_height());
+	enhancement_image_description_ =
+	    ImageDescription(image_description.format(), dimensions_.conformant_width(), dimensions_.conformant_height());
+}
+
 void Encoder::initialise_config(const Parameters &parameters, std::vector<std::unique_ptr<Image>> &src_image) {
 	// Build default parameters
 	auto pb = Parameters::build();

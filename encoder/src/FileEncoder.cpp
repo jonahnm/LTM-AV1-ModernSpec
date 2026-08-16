@@ -128,6 +128,28 @@ static string codec_executable(const string &name) {
 	return name;
 }
 
+static string format_name(ImageFormat format) {
+	switch (format) {
+	case IMAGE_FORMAT_YUV420P8: return "yuv420p";
+	case IMAGE_FORMAT_YUV420P10: return "yuv420p10";
+	case IMAGE_FORMAT_YUV420P12: return "yuv420p12";
+	case IMAGE_FORMAT_YUV420P14: return "yuv420p14";
+	case IMAGE_FORMAT_YUV422P8: return "yuv422p";
+	case IMAGE_FORMAT_YUV422P10: return "yuv422p10";
+	case IMAGE_FORMAT_YUV422P12: return "yuv422p12";
+	case IMAGE_FORMAT_YUV422P14: return "yuv422p14";
+	case IMAGE_FORMAT_YUV444P8: return "yuv444p";
+	case IMAGE_FORMAT_YUV444P10: return "yuv444p10";
+	case IMAGE_FORMAT_YUV444P12: return "yuv444p12";
+	case IMAGE_FORMAT_YUV444P14: return "yuv444p14";
+	case IMAGE_FORMAT_Y8: return "y";
+	case IMAGE_FORMAT_Y10: return "y10";
+	case IMAGE_FORMAT_Y12: return "y12";
+	case IMAGE_FORMAT_Y14: return "y14";
+	default: return "unknown";
+	}
+}
+
 // SVT-AV1 versions before 4.0 do not accept the --obu flag and always write an IVF container;
 // newer versions default to IVF too and need --obu for the raw low-overhead OBU stream. Probe
 // the installed binary once for --obu support and cache the result.
@@ -251,7 +273,7 @@ protected:
 
 	// Size, format & depth - base, intermediate & full resolution
 	//
-	const unsigned fps_;
+	unsigned fps_;
 	const Parameters parameters_;
 
 	const ScalingMode scaling_mode_[MAX_NUM_LOQS];
@@ -327,6 +349,23 @@ void FileEncoderImpl::encode_file(const string &src_filename, const string &dst_
 	// Read source and downsample into base
 	//
 	unique_ptr<YUVReader> src_file(CHECK(CreateYUVReader(src_filename, encoder_.src_image_description(), fps_)));
+
+	// A YUV4MPEG2 header read from a pipe/FIFO carries the true geometry, format and frame rate;
+	// adopt them when they differ from the command line defaults so the encode matches the source
+	//
+	if (src_file->is_y4m()) {
+		if (!(src_file->description() == encoder_.src_image_description())) {
+			INFO("YUV4MPEG2 input %ux%u %s - adopting geometry/format",
+			     src_file->description().width(), src_file->description().height(),
+			     format_name(src_file->description().format()).c_str());
+			encoder_.update_source_description(src_file->description(), parameters_);
+		}
+		if (src_file->rate() > 0 && src_file->rate() != (float)fps_) {
+			const unsigned y4m_fps = (unsigned)(src_file->rate() + 0.5f);
+			INFO("YUV4MPEG2 input rate %.3f fps - using %u fps for base encoding", src_file->rate(), y4m_fps);
+			fps_ = y4m_fps;
+		}
+	}
 
 	// A sequential source is encoded single-pass when the base codec can run in lockstep
 	// through FIFOs - the source is then read exactly once with no spooling and no need to
@@ -625,7 +664,9 @@ void FileEncoderImpl::encode_single_pass(YUVReader &src_file, Dav1dReconReader &
 
 					// Keep the current and next source frame in the window; when the source is
 					// exhausted, the remaining base frames are written through un-enhanced
-					while (src.size() <= display_frame + 1) {
+					if (display_frame != 0)
+						src.erase(src.begin());
+					while (src.size() < 2) {
 						Image next_frame = next_source_frame();
 						if (next_frame.empty())
 							break;
@@ -642,9 +683,6 @@ void FileEncoderImpl::encode_single_pass(YUVReader &src_file, Dav1dReconReader &
 						display_frame++;
 						continue;
 					}
-
-					if (display_frame != 0)
-						src.erase(src.begin());
 
 					const Image recon = recon_reader.read(display_frame, display_frame);
 
