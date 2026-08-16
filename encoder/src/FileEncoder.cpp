@@ -57,6 +57,10 @@
 
 #include <cassert>
 
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
+
 #include "Config.hpp"
 #include "Convert.hpp"
 #include "Downsampling.hpp"
@@ -224,6 +228,28 @@ FileEncoderImpl::FileEncoderImpl(const ImageDescription &image_description, unsi
 
 FileEncoderImpl::~FileEncoderImpl() {}
 
+// Open the output elementary stream - "-" means stdout, via a duplicate so the writer can
+// own (and fclose) it without ever closing the real stdout. The original stdout is then
+// redirected to stderr so the per-frame reports (printed to stdout from encode()) do not
+// corrupt the stream
+//
+static UniquePtrFile open_es_output(const string &dst_filename) {
+	UniquePtrFile output_file;
+	if (dst_filename == "-") {
+#if defined(_WIN32)
+		output_file.reset(fdopen(_dup(_fileno(stdout)), "wb"));
+		_dup2(_fileno(stderr), _fileno(stdout));
+#else
+		output_file.reset(fdopen(dup(fileno(stdout)), "wb"));
+		dup2(fileno(stderr), fileno(stdout));
+#endif
+	} else {
+		output_file.reset(fopen(dst_filename.c_str(), "wb"));
+	}
+	CHECK(output_file.get());
+	return output_file;
+}
+
 //
 //
 void FileEncoderImpl::encode_file(const string &src_filename, const string &dst_filename, const string &dst_filename_yuv,
@@ -333,7 +359,7 @@ void FileEncoderImpl::encode_file(const string &src_filename, const string &dst_
 		recon_file = CHECK(CreateYUVReader(base_recon_filename, encoder_.base_image_description(), fps_));
 	}
 
-	UniquePtrFile output_file(CHECK(fopen(format("%s", dst_filename.c_str()).c_str(), "wb")));
+	UniquePtrFile output_file(open_es_output(dst_filename));
 
 	ESFile es_file;
 	CHECK(es_file.Open(base_bin_filename, es_file_type()));
@@ -404,7 +430,7 @@ void FileEncoderImpl::encode_file_with_decoder(const string &src_filename, const
 		recon_file = CHECK(CreateYUVReader(base_recon_filename, encoder_.base_image_description(), fps_));
 	}
 
-	UniquePtrFile output_file(CHECK(fopen(format("%s", dst_filename.c_str()).c_str(), "wb")));
+	UniquePtrFile output_file(open_es_output(dst_filename));
 
 	ESFile es_file;
 	CHECK(es_file.Open(base_filename, es_file_type()));
@@ -479,7 +505,7 @@ void FileEncoderImpl::encode_file_with_base(const string &src_filename, const st
 		WARN("Cannot find dimension of base.");
 	}
 
-	UniquePtrFile output_file(CHECK(fopen(format("%s", dst_filename.c_str()).c_str(), "wb")));
+	UniquePtrFile output_file(open_es_output(dst_filename));
 
 	ESFile es_file;
 	CHECK(es_file.Open(base_filename, es_file_type()));

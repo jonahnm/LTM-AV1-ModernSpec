@@ -52,6 +52,9 @@
 
 #if !defined(_WIN32)
 #include <sys/stat.h>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 #endif
 
 #include "Diagnostics.hpp"
@@ -260,9 +263,20 @@ static bool ParseYUV4MPEG2HeaderLine(const std::string &line, unsigned *width, u
 static ImageFormat YUV4MPEG2ChromaFormat(const std::string &value);
 
 std::unique_ptr<YUVReader> CreateYUVReader(const std::string &name, const ImageDescription &description, unsigned rate) {
-	// Open the file (for a FIFO this blocks until a writer connects)
+	// Open the file (for a FIFO this blocks until a writer connects). "-" means read from
+	// stdin - use a duplicate so the reader can own the stream (and seek it when stdin is a
+	// regular file) without ever closing the real stdin
 	//
-	UniquePtrFile yuvFile(std::fopen(name.c_str(), "rb"));
+	UniquePtrFile yuvFile;
+	if (name == "-") {
+#if defined(_WIN32)
+		yuvFile.reset(fdopen(_dup(_fileno(stdin)), "rb"));
+#else
+		yuvFile.reset(fdopen(dup(fileno(stdin)), "rb"));
+#endif
+	} else {
+		yuvFile.reset(std::fopen(name.c_str(), "rb"));
+	}
 	if (!yuvFile)
 		ERR("Cannot open YUV file");
 
