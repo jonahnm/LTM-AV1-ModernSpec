@@ -129,7 +129,6 @@ list(APPEND DECODER_SRCS
 list(APPEND ENCODER_SRCS
   ${SRC_DIR}/src/ModelEncoderApp.cpp
   ${SRC_DIR}/encoder/src/FileEncoder.cpp
-  ${SRC_DIR}/encoder/src/Dav1dReconReader.cpp
   ${SRC_DIR}/encoder/src/Encoder.cpp
   ${SRC_DIR}/decoder/src/Add.cpp
   ${SRC_DIR}/decoder/src/Convert.cpp
@@ -191,9 +190,29 @@ list(APPEND ENCODER_SRCS
   ${SRC_DIR}/src/uBaseDecoderAV1.cpp
   ${SRC_DIR}/src/uESFile.cpp  )
 
-# libdav1d is used in-process to reconstruct the AV1 base stream in the single-pass path
-find_library(DAV1D_LIBRARY NAMES dav1d)
-find_path(DAV1D_INCLUDE_DIR NAMES dav1d/dav1d.h)
+# libdav1d is used in-process to reconstruct the AV1 base stream in the single-pass path. It is
+# an optional dependency: when not found, the AV1 single-pass streaming path is simply disabled.
+set(DAV1D_FOUND FALSE)
+find_package(PkgConfig QUIET)
+if(PKG_CONFIG_FOUND)
+  pkg_check_modules(PC_DAV1D QUIET IMPORTED_TARGET dav1d)
+  if(PC_DAV1D_FOUND)
+    set(DAV1D_FOUND TRUE)
+  endif()
+endif()
+if(NOT DAV1D_FOUND)
+  find_path(DAV1D_INCLUDE_DIR NAMES dav1d/dav1d.h)
+  find_library(DAV1D_LIBRARY NAMES dav1d)
+  if(DAV1D_INCLUDE_DIR AND DAV1D_LIBRARY)
+    set(DAV1D_FOUND TRUE)
+  endif()
+endif()
+if(DAV1D_FOUND)
+  message(STATUS "Found libdav1d - enabling AV1 single-pass streaming")
+  list(APPEND ENCODER_SRCS ${SRC_DIR}/encoder/src/Dav1dReconReader.cpp)
+else()
+  message(STATUS "libdav1d not found - AV1 single-pass streaming disabled (falls back to two-pass with source spooling)")
+endif()
 
 ### Tests
 ##
@@ -300,9 +319,14 @@ foreach(TARGET ${LCEVC_TARGETS})
 
   # External libraries to link to
   target_link_libraries(${TARGET} ${LCEVC_EXTERNAL_LINK_LIBS} )
-  if(DAV1D_LIBRARY)
-    target_link_libraries(ModelEncoder ${DAV1D_LIBRARY})
-    target_include_directories(ModelEncoder PRIVATE "${DAV1D_INCLUDE_DIR}")
+  if(DAV1D_FOUND)
+    if(PC_DAV1D_FOUND)
+      target_link_libraries(ModelEncoder PkgConfig::PC_DAV1D)
+    else()
+      target_link_libraries(ModelEncoder ${DAV1D_LIBRARY})
+      target_include_directories(ModelEncoder PRIVATE "${DAV1D_INCLUDE_DIR}")
+    endif()
+    target_compile_definitions(ModelEncoder PRIVATE LTM_HAVE_DAV1D)
   endif()
   if(LTM_ENABLE_VVC_PARSER)
     target_link_libraries(${TARGET} BaseVvcMinimumVTM)

@@ -38,7 +38,9 @@
 //
 
 #include "FileEncoder.hpp"
+#if defined(LTM_HAVE_DAV1D)
 #include "Dav1dReconReader.hpp"
+#endif
 
 #include <cinttypes>
 #include <cstdint>
@@ -199,9 +201,13 @@ protected:
 	// Single-pass streaming - encode the source in one pass, with the base encoder and decoder
 	// running in lockstep through FIFOs so that no source spooling is needed and the frame
 	// count does not need to be known in advance. Only implementations whose base stream is in
-	// display order (AV1) and can run through FIFOs support this.
+	// display order (AV1) and can run through FIFOs support this. This requires libdav1d which
+	// is linked in when available; otherwise single_pass_available() stays false and the
+	// single-pass paths are never taken.
 	//
 	virtual bool single_pass_available() const { return false; }
+
+#if defined(LTM_HAVE_DAV1D)
 	virtual string single_pass_base_encoder_command(const string &input_fifo, const string &es_fifo) const {
 		ERR("Single-pass streaming is not supported with this base encoder.");
 		return "";
@@ -211,6 +217,7 @@ protected:
 	                             unsigned limit);
 	void encode_single_pass(YUVReader &src_file, Dav1dReconReader &recon_reader, FILE *output_file, ESFile &es_file,
 	                        const string &dst_filename_yuv, unsigned limit, FILE *svt_input);
+#endif
 
 	virtual bool run_base_encoder(const string &input, const string &stream_output, const string &recon_output,
 	                              unsigned frame_count) const = 0;
@@ -299,10 +306,12 @@ void FileEncoderImpl::encode_file(const string &src_filename, const string &dst_
 	// through FIFOs - the source is then read exactly once with no spooling and no need to
 	// know the frame count in advance
 	//
+#if defined(LTM_HAVE_DAV1D)
 	if (src_file->sequential() && single_pass_available()) {
 		encode_file_single_pass(*src_file, dst_filename, dst_filename_yuv, limit);
 		return;
 	}
+#endif
 
 	// A pipe/FIFO source can only be read once, but the enhancement pass needs to re-read the
 	// source. Spool a sequential source to a temporary regular file up front so the rest of the
@@ -414,6 +423,7 @@ void FileEncoderImpl::encode_file(const string &src_filename, const string &dst_
 		::remove(src_spool_filename.c_str());
 }
 
+#if defined(LTM_HAVE_DAV1D)
 // Single-pass streaming encode: the source is consumed once and the enhancement for each frame
 // is produced as soon as its base AU is available, so neither a source spool nor a known frame
 // count is required. The base encoder reads its input from a FIFO we write, writes its stream
@@ -720,6 +730,7 @@ void FileEncoderImpl::encode_single_pass(YUVReader &src_file, Dav1dReconReader &
 		REPORT("========= ========= ========= ========= ========= ========= ========= ========= ");
 	}
 }
+#endif // LTM_HAVE_DAV1D
 
 void FileEncoderImpl::encode_file_with_decoder(const string &src_filename, const string base_filename, const string &dst_filename,
                                                const string &dst_filename_yuv, unsigned limit) {
@@ -1710,11 +1721,14 @@ public:
 	// Single-pass streaming can run the AV1 base encoder/decoder pair in lockstep through FIFOs
 	// with an unknown frame count (the AV1 stream is in display order, so per-AU enhancement is
 	// produced as soon as the AU itself arrives)
+#if defined(LTM_HAVE_DAV1D)
 	bool single_pass_available() const override { return true; }
+#endif
 
 	// The single-pass base encoder reads its input from one FIFO and writes its stream to
 	// another, and encodes until its input ends (-n 0) because the frame count is not known
 	//
+#if defined(LTM_HAVE_DAV1D)
 	string single_pass_base_encoder_command(const string &input_fifo, const string &es_fifo) const override {
 		if (encoder_.base_image_description().colourspace() != Colourspace_YUV420)
 			ERR("Only encodings with a 4:2:0 colourspace are supported by SVT-AV1.");
@@ -1731,6 +1745,7 @@ public:
 		              encoder_.base_image_description().height(), fps_, encoder_.base_image_description().bit_depth(), qp,
 		              intra_period(), es_fifo.c_str());
 	}
+#endif
 
 	// Start SVT-AV1 reading the downsampled base YUV from stdin - returns a pipe to write into
 	//
