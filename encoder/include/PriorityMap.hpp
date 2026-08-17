@@ -52,7 +52,7 @@
 // #define PRIORITY_RESI_SL1
 // #define PRIORITY_RESI_SL2
 
-#define PRIORITY_COEF
+// #define PRIORITY_COEF
 
 #define BLOCK_SIZE 8
 

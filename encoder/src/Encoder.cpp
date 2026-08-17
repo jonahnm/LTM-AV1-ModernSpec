@@ -853,6 +853,7 @@ void Encoder::encode_residuals(unsigned plane, unsigned loq, const Surface &resi
 	else if (final && loq == LOQ_LEVEL_2)
 		Surface::dump_layers(symbols, format("enc_full_coeff_quant_output_P%1d", plane), transform_block_size());
 
+#if defined PRIORITY_COEF
 	if (final && !pixel_sad.empty() && pixel_sad.get_dump_surfaces() && loq == LOQ_LEVEL_2) {
 		// Creation of debug maps
 
@@ -913,6 +914,7 @@ void Encoder::encode_residuals(unsigned plane, unsigned loq, const Surface &resi
 		        .finish();
 		static_residuals_debug.dump(format("enc_full_coeff_SAD_changes_P%1d", plane));
 	}
+#endif // defined PRIORITY_COEF
 }
 
 Surface Encoder::decode_residuals(unsigned plane, unsigned loq, const Surface symbols[MAX_NUM_LAYERS], Temporal_SWM temp_type,
@@ -1457,6 +1459,10 @@ Packet Encoder::encode(std::vector<std::unique_ptr<Image>> &src_image, const Ima
 					encode_residuals(plane, LOQ_LEVEL_2, enhanced_residuals, symbols[plane][LOQ_LEVEL_2],
 					                 Temporal_SWM::SWM_Disabled, EncodingMode::ENCODE_ALL, Surface(), priority_type,
 					                 encoder_configuration_.priority_type_sl_2, true, pixel_sad);
+#else
+					encode_residuals(plane, LOQ_LEVEL_2, enhanced_residuals, symbols[plane][LOQ_LEVEL_2],
+					                 Temporal_SWM::SWM_Disabled, EncodingMode::ENCODE_ALL, Surface(), Surface(),
+					                 encoder_configuration_.priority_type_sl_2, true, pixel_sad);
 #endif            // defined PRIORITY_COEF
 				} // if plane == 0
 				else {
@@ -1668,6 +1674,10 @@ Packet Encoder::encode(std::vector<std::unique_ptr<Image>> &src_image, const Ima
 #if defined PRIORITY_COEF
 					encode_residuals(plane, LOQ_LEVEL_2, residuals_input, symbols[plane][LOQ_LEVEL_2], Temporal_SWM::SWM_Dependent,
 					                 EncodingMode::ENCODE_ALL, temporal_mask, priority_type,
+					                 encoder_configuration_.priority_type_sl_2, true, pixel_sad);
+#else
+					encode_residuals(plane, LOQ_LEVEL_2, residuals_input, symbols[plane][LOQ_LEVEL_2], Temporal_SWM::SWM_Dependent,
+					                 EncodingMode::ENCODE_ALL, temporal_mask, Surface(),
 					                 encoder_configuration_.priority_type_sl_2, true, pixel_sad);
 #endif            // defined PRIORITY_COEF
 				} // if plane == 0
