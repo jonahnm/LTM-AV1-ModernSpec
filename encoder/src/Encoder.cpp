@@ -89,6 +89,8 @@
 #include <thread>
 #include <vector>
 
+#include "ThreadPool.hpp"
+
 using namespace std;
 
 // bitstream statistics
@@ -765,66 +767,86 @@ void Encoder::encode_residuals(unsigned plane, unsigned loq, const Surface &resi
 	//// Quantize each layer - each layer is independent, process them in parallel
 	//
 	{
-		std::vector<std::thread> threads;
 		const unsigned n_layers = num_residual_layers();
-		// The planes run in parallel already; give the luma plane most of the cores (it has 4x
-		// the chroma area) and run the chroma planes inline to avoid oversubscribing
-		const unsigned cores = std::max(1u, std::thread::hardware_concurrency());
-		const unsigned n_threads = (plane == 0) ? std::min(n_layers, std::max(1u, cores - 2)) : 1;
-		std::vector<std::exception_ptr> errors(n_threads);
-		auto quantize_range = [&](unsigned begin, unsigned end, unsigned tid) {
-			try {
-				for (unsigned layer = begin; layer < end; ++layer) {
-					Surface syms;
-					if (passes == 1) {
+		// User data insertion is not thread-safe (shared RNG/state), so fall back to the
+		// sequential loop when it is enabled
+		if (configuration_.global_configuration.user_data_enabled != UserData_None) {
+			for (unsigned layer = 0; layer < n_layers; ++layer) {
+				Surface syms;
+				if (passes == 1) {
 #if defined PRIORITY_COEF
-						syms = Quantize().process(priority_coefficients[layer], dirq_step_width[layer][0], dirq_deadzone[layer][0],
-						                          pixel_sad, transform_block_size(),
-						                          encoder_configuration_.quant_reduced_deadzone);
+					syms = Quantize().process(priority_coefficients[layer], dirq_step_width[layer][0], dirq_deadzone[layer][0],
+					                          pixel_sad, transform_block_size(),
+					                          encoder_configuration_.quant_reduced_deadzone);
 #else  // defined PRIORITY_COEF
-						syms = Quantize().process(coefficients_sad[layer], dirq_step_width[layer][0], dirq_deadzone[layer][0],
-						                          pixel_sad, transform_block_size(),
-						                          encoder_configuration_.quant_reduced_deadzone);
+					syms = Quantize().process(coefficients_sad[layer], dirq_step_width[layer][0], dirq_deadzone[layer][0],
+					                          pixel_sad, transform_block_size(),
+					                          encoder_configuration_.quant_reduced_deadzone);
 #endif // defined PRIORITY_COEF
-					} else {
+				} else {
 #if defined PRIORITY_COEF
-						syms = Quantize_SWM().process(priority_coefficients[layer], transform_block_size(), dirq_step_width[layer],
-						                              dirq_deadzone[layer], temporal_mask, pixel_sad,
-						                              encoder_configuration_.quant_reduced_deadzone);
+					syms = Quantize_SWM().process(priority_coefficients[layer], transform_block_size(), dirq_step_width[layer],
+					                              dirq_deadzone[layer], temporal_mask, pixel_sad,
+					                              encoder_configuration_.quant_reduced_deadzone);
 #else  // defined PRIORITY_COEF
-						syms = Quantize_SWM().process(coefficients_sad[layer], transform_block_size(), dirq_step_width[layer],
-						                              dirq_deadzone[layer], temporal_mask, pixel_sad,
-						                              encoder_configuration_.quant_reduced_deadzone);
+					syms = Quantize_SWM().process(coefficients_sad[layer], transform_block_size(), dirq_step_width[layer],
+					                              dirq_deadzone[layer], temporal_mask, pixel_sad,
+					                              encoder_configuration_.quant_reduced_deadzone);
 #endif // defined PRIORITY_COEF
-					}
-					if (is_user_data_layer(loq, layer)) {
-						//// Insert User Data
-#if USER_DATA_EXTRACTION
-						FILE *file = fopen("userdata_enc.bin", "ab");
-						symbols[layer] = UserDataInsert().process(syms, encoder_configuration_.user_data_method,
-						                                          configuration_.global_configuration.user_data_enabled, file);
-						fclose(file);
-#else
-						symbols[layer] = UserDataInsert().process(syms, encoder_configuration_.user_data_method,
-						                                          configuration_.global_configuration.user_data_enabled);
-#endif
-					} else
-						symbols[layer] = syms;
 				}
-			} catch (...) {
-				errors[tid] = std::current_exception();
+				if (is_user_data_layer(loq, layer)) {
+					//// Insert User Data
+#if USER_DATA_EXTRACTION
+					FILE *file = fopen("userdata_enc.bin", "ab");
+					symbols[layer] = UserDataInsert().process(syms, encoder_configuration_.user_data_method,
+					                                          configuration_.global_configuration.user_data_enabled, file);
+					fclose(file);
+#else
+					symbols[layer] = UserDataInsert().process(syms, encoder_configuration_.user_data_method,
+					                                          configuration_.global_configuration.user_data_enabled);
+#endif
+				} else
+					symbols[layer] = syms;
 			}
-		};
-		for (unsigned t = 0; t < n_threads; ++t) {
-			const unsigned begin = (n_layers * t) / n_threads;
-			const unsigned end = (n_layers * (t + 1)) / n_threads;
-			threads.emplace_back(quantize_range, begin, end, t);
+		} else {
+			ThreadPool::instance().parallel_for(n_layers, [&](unsigned layer) {
+				Surface syms;
+				if (passes == 1) {
+#if defined PRIORITY_COEF
+					syms = Quantize().process(priority_coefficients[layer], dirq_step_width[layer][0], dirq_deadzone[layer][0],
+					                          pixel_sad, transform_block_size(),
+					                          encoder_configuration_.quant_reduced_deadzone);
+#else  // defined PRIORITY_COEF
+					syms = Quantize().process(coefficients_sad[layer], dirq_step_width[layer][0], dirq_deadzone[layer][0],
+					                          pixel_sad, transform_block_size(),
+					                          encoder_configuration_.quant_reduced_deadzone);
+#endif // defined PRIORITY_COEF
+				} else {
+#if defined PRIORITY_COEF
+					syms = Quantize_SWM().process(priority_coefficients[layer], transform_block_size(), dirq_step_width[layer],
+					                              dirq_deadzone[layer], temporal_mask, pixel_sad,
+					                              encoder_configuration_.quant_reduced_deadzone);
+#else  // defined PRIORITY_COEF
+					syms = Quantize_SWM().process(coefficients_sad[layer], transform_block_size(), dirq_step_width[layer],
+					                              dirq_deadzone[layer], temporal_mask, pixel_sad,
+					                              encoder_configuration_.quant_reduced_deadzone);
+#endif // defined PRIORITY_COEF
+				}
+				if (is_user_data_layer(loq, layer)) {
+					//// Insert User Data
+#if USER_DATA_EXTRACTION
+					FILE *file = fopen("userdata_enc.bin", "ab");
+					symbols[layer] = UserDataInsert().process(syms, encoder_configuration_.user_data_method,
+					                                          configuration_.global_configuration.user_data_enabled, file);
+					fclose(file);
+#else
+					symbols[layer] = UserDataInsert().process(syms, encoder_configuration_.user_data_method,
+					                                          configuration_.global_configuration.user_data_enabled);
+#endif
+				} else
+					symbols[layer] = syms;
+			});
 		}
-		for (auto &t : threads)
-			t.join();
-		for (auto &e : errors)
-			if (e)
-				std::rethrow_exception(e);
 	}
 	if (final && loq == LOQ_LEVEL_1)
 		Surface::dump_layers(symbols, format("enc_base_coeff_quant_output_P%1d", plane), transform_block_size());
@@ -957,51 +979,31 @@ Surface Encoder::decode_residuals(unsigned plane, unsigned loq, const Surface sy
 
 	// Dequantize - each layer is independent, process them in parallel
 	{
-		std::vector<std::thread> threads;
 		const unsigned n_layers = num_residual_layers();
-		const unsigned cores = std::max(1u, std::thread::hardware_concurrency());
-		const unsigned n_threads = (plane == 0) ? std::min(n_layers, std::max(1u, cores - 2)) : 1;
-		std::vector<std::exception_ptr> errors(n_threads);
-		auto dequantize_range = [&](unsigned begin, unsigned end, unsigned tid) {
-			try {
-				for (unsigned layer = begin; layer < end; ++layer) {
-					Surface syms;
-					if (is_user_data_layer(loq, layer))
-						syms = UserDataClear().process(symbols[layer], configuration_.global_configuration.user_data_enabled);
-					else
-						syms = symbols[layer];
+		ThreadPool::instance().parallel_for(n_layers, [&](unsigned layer) {
+			Surface syms;
+			if (is_user_data_layer(loq, layer))
+				syms = UserDataClear().process(symbols[layer], configuration_.global_configuration.user_data_enabled);
+			else
+				syms = symbols[layer];
 
-					if (passes == 1) {
-						coefficients[layer] = InverseQuantize().process(
-						    syms, invq_step_width[layer][0],
-						    find_invq_applied_offset(configuration_.picture_configuration, invq_offset[layer][0],
-						                             invq_deadzone[layer][0]));
-					} else {
-						int32_t invq_applied_offset[2] = {
-						    find_invq_applied_offset(configuration_.picture_configuration, invq_offset[layer][0],
-						                             invq_deadzone[layer][0]),
-						    find_invq_applied_offset(configuration_.picture_configuration, invq_offset[layer][1],
-						                             invq_deadzone[layer][1])};
+			if (passes == 1) {
+				coefficients[layer] = InverseQuantize().process(
+				    syms, invq_step_width[layer][0],
+				    find_invq_applied_offset(configuration_.picture_configuration, invq_offset[layer][0],
+				                             invq_deadzone[layer][0]));
+			} else {
+				int32_t invq_applied_offset[2] = {
+				    find_invq_applied_offset(configuration_.picture_configuration, invq_offset[layer][0],
+				                             invq_deadzone[layer][0]),
+				    find_invq_applied_offset(configuration_.picture_configuration, invq_offset[layer][1],
+				                             invq_deadzone[layer][1])};
 
-						coefficients[layer] = InverseQuantize_SWM().process(symbols[layer], transform_block_size(),
-						                                                    invq_step_width[layer], invq_applied_offset,
-						                                                    temporal_mask);
-					}
-				}
-			} catch (...) {
-				errors[tid] = std::current_exception();
+				coefficients[layer] = InverseQuantize_SWM().process(symbols[layer], transform_block_size(),
+				                                                    invq_step_width[layer], invq_applied_offset,
+				                                                    temporal_mask);
 			}
-		};
-		for (unsigned t = 0; t < n_threads; ++t) {
-			const unsigned begin = (n_layers * t) / n_threads;
-			const unsigned end = (n_layers * (t + 1)) / n_threads;
-			threads.emplace_back(dequantize_range, begin, end, t);
-		}
-		for (auto &t : threads)
-			t.join();
-		for (auto &e : errors)
-			if (e)
-				std::rethrow_exception(e);
+		});
 	}
 
 	Surface residuals;
@@ -1130,7 +1132,6 @@ Packet Encoder::encode(std::vector<std::unique_ptr<Image>> &src_image, const Ima
 	// for the common (steady-state) case.
 	//
 	const unsigned num_planes = src_image[0]->description().num_planes();
-	std::vector<std::thread> plane_threads;
 	std::mutex plane_mutex;
 	std::vector<bool> plane_temporal_refresh(num_planes);
 	std::vector<bool> plane_temporal_signalling(num_planes);
@@ -1748,11 +1749,7 @@ Packet Encoder::encode(std::vector<std::unique_ptr<Image>> &src_image, const Ima
 		} else
 			outp_reco[plane] = full_reco[plane];
 	};
-
-	for (unsigned plane = 0; plane < num_planes; ++plane)
-		plane_threads.emplace_back(encode_plane, plane);
-	for (auto &t : plane_threads)
-		t.join();
+	ThreadPool::instance().parallel_for(num_planes, [&](unsigned plane) { encode_plane(plane); });
 
 	// Reconcile the frame-level temporal flags with the shared picture configuration - all
 	// planes compute the same values in the common case, plane 0 wins ties

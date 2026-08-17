@@ -39,9 +39,9 @@
 #include "Downsampling.hpp"
 #include "Convert.hpp"
 #include "Misc.hpp"
+#include "ThreadPool.hpp"
 
 #include <algorithm>
-#include <vector>
 
 using namespace std;
 
@@ -95,10 +95,10 @@ Surface Downsampling::process(const Surface &src_plane, Downsample downsample) {
 	auto h_dst = Surface::build_from<int16_t>();
 	h_dst.reserve(dst_width, src_height);
 
-	// Horizontal
-	//
-	for (unsigned y = 0; y < src_height; ++y)
+	// Horizontal - each row is independent, process in parallel
+	ThreadPool::instance().parallel_for(src_height, [&](unsigned y) {
 		apply_kernel(h_dst.data(0, y), 1, h_src.data(0, y), 1, dst_width, kernel);
+	});
 
 	Surface intermediate = h_dst.finish();
 
@@ -107,10 +107,10 @@ Surface Downsampling::process(const Surface &src_plane, Downsample downsample) {
 	auto v_dst = Surface::build_from<int16_t>();
 	v_dst.reserve(dst_width, dst_height);
 
-	// Vertical
-	//
-	for (unsigned x = 0; x < dst_width; ++x)
+	// Vertical - each column is independent, process in parallel
+	ThreadPool::instance().parallel_for(dst_width, [&](unsigned x) {
 		apply_kernel(v_dst.data(x, 0), dst_width, v_src.data(x, 0), dst_width, dst_height, kernel);
+	});
 
 	return v_dst.finish();
 }
@@ -132,8 +132,10 @@ Surface Downsampling_1D::process(const Surface &src_plane, Downsample downsample
 	auto dst = Surface::build_from<int16_t>();
 	dst.reserve(dst_width, height);
 
-	for (unsigned y = 0; y < height; ++y)
+	// Each row is independent, process in parallel
+	ThreadPool::instance().parallel_for(height, [&](unsigned y) {
 		apply_kernel(dst.data(0, y), 1, src.data(0, y), 1, dst_width, kernel);
+	});
 
 	return dst.finish();
 }

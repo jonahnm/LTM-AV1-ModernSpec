@@ -38,10 +38,9 @@
 
 #include <cstdint>
 #include <algorithm>
-#include <thread>
-#include <vector>
 #include "TransformDDS.hpp"
 #include "Config.hpp"
+#include "ThreadPool.hpp"
 
 namespace lctm {
 
@@ -92,51 +91,39 @@ void TransformDDS::process(const Surface &residuals, EncodingMode mode, Surface 
 	// Process each layer in parallel - every layer only reads the source surface and writes
 	// its own output layer, so the 16 layer transforms are independent
 	{
-		std::vector<std::thread> threads;
-		const unsigned n_layers = 16;
-		const unsigned n_threads = std::min(n_layers, std::max(1u, std::thread::hardware_concurrency()));
-		auto transform_range = [&](unsigned begin, unsigned end) {
-			const int16_t *srcp = src.data();
-			const ptrdiff_t src_stride = src.stride() / sizeof(int16_t); // stride is in bytes
-			for (unsigned l = begin; l < end; ++l) {
-				if (encode_flags.encode_residual(l)) {
-					const int32_t *b = basis[l];
-					auto dest = Surface::build_from<int16_t>();
-					dest.reserve(width, height);
-					int16_t *dst = dest.data();
-					for (unsigned y = 0; y < height; ++y) {
-						const int16_t *r0 = srcp + (ptrdiff_t)(4 * y) * src_stride;
-						const int16_t *r1 = r0 + src_stride;
-						const int16_t *r2 = r1 + src_stride;
-						const int16_t *r3 = r2 + src_stride;
-						for (unsigned x = 0; x < width; ++x, dst += 1) {
-							const int16_t *c0 = r0 + 4 * x;
-							const int16_t *c1 = r1 + 4 * x;
-							const int16_t *c2 = r2 + 4 * x;
-							const int16_t *c3 = r3 + 4 * x;
-							const int32_t coef =
-							    (c0[0] * b[0] + c0[1] * b[1] + c0[2] * b[2] + c0[3] * b[3] + c1[0] * b[4] + c1[1] * b[5] +
-							     c1[2] * b[6] + c1[3] * b[7] + c2[0] * b[8] + c2[1] * b[9] + c2[2] * b[10] + c2[3] * b[11] +
-							     c3[0] * b[12] + c3[1] * b[13] + c3[2] * b[14] + c3[3] * b[15]) /
-							    16;
-							*dst = (int16_t)coef;
-						}
+		const int16_t *srcp = src.data();
+		const ptrdiff_t src_stride = src.stride() / sizeof(int16_t); // stride is in bytes
+		ThreadPool::instance().parallel_for(16, [&](unsigned l) {
+			if (encode_flags.encode_residual(l)) {
+				const int32_t *b = basis[l];
+				auto dest = Surface::build_from<int16_t>();
+				dest.reserve(width, height);
+				int16_t *dst = dest.data();
+				for (unsigned y = 0; y < height; ++y) {
+					const int16_t *r0 = srcp + (ptrdiff_t)(4 * y) * src_stride;
+					const int16_t *r1 = r0 + src_stride;
+					const int16_t *r2 = r1 + src_stride;
+					const int16_t *r3 = r2 + src_stride;
+					for (unsigned x = 0; x < width; ++x, dst += 1) {
+						const int16_t *c0 = r0 + 4 * x;
+						const int16_t *c1 = r1 + 4 * x;
+						const int16_t *c2 = r2 + 4 * x;
+						const int16_t *c3 = r3 + 4 * x;
+						const int32_t coef =
+						    (c0[0] * b[0] + c0[1] * b[1] + c0[2] * b[2] + c0[3] * b[3] + c1[0] * b[4] + c1[1] * b[5] +
+						     c1[2] * b[6] + c1[3] * b[7] + c2[0] * b[8] + c2[1] * b[9] + c2[2] * b[10] + c2[3] * b[11] +
+						     c3[0] * b[12] + c3[1] * b[13] + c3[2] * b[14] + c3[3] * b[15]) /
+						    16;
+						*dst = (int16_t)coef;
 					}
-					layers[l] = dest.finish();
-				} else {
-					layers[l] = Surface::build_from<int16_t>()
-					                .generate(width, height, [](unsigned x, unsigned y) -> int16_t { return 0; })
-					                .finish();
 				}
+				layers[l] = dest.finish();
+			} else {
+				layers[l] = Surface::build_from<int16_t>()
+				                .generate(width, height, [](unsigned x, unsigned y) -> int16_t { return 0; })
+				                .finish();
 			}
-		};
-		for (unsigned t = 0; t < n_threads; ++t) {
-			const unsigned begin = (n_layers * t) / n_threads;
-			const unsigned end = (n_layers * (t + 1)) / n_threads;
-			threads.emplace_back(transform_range, begin, end);
-		}
-		for (auto &t : threads)
-			t.join();
+		});
 	}
 
 #else
