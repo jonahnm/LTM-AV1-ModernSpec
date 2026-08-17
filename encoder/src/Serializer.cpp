@@ -741,6 +741,7 @@ void Serializer::emit_encoded_data(const SignaledConfiguration &signaled_configu
 		b.u(1, 0, "alignment");
 
 	// Emit surfaces
+	bool emitted_surface_data = false;
 	for (unsigned plane = 0; plane < signaled_configuration.global_configuration.num_processed_planes; ++plane) {
 		for (unsigned loq = 0; loq < MAX_NUM_LOQS; ++loq) {
 
@@ -751,10 +752,19 @@ void Serializer::emit_encoded_data(const SignaledConfiguration &signaled_configu
 				if (entropy_enabled[plane][loq][layer]) {
 					write_multibyte(b, data[plane][loq][layer].size(), "data_size");
 					b.bytes(data[plane][loq][layer]);
+					emitted_surface_data = true;
 				}
 			}
 		}
 	}
+
+	// If no surface data was written (all residuals quantised to zero) the block
+	// consists of the entropy flags alone. Decoders that validate the block framing
+	// (ffmpeg's CBS LCEVC) require at least one byte of data after the flags, so
+	// emit a single padding byte. It is ignored by bitstream parsers that only
+	// locate the surfaces via the flags, and skipped as data by the strict ones.
+	if (!emitted_surface_data)
+		b.u(8, 0x01, "empty_encoded_data_padding");
 
 #if BITSTREAM_DEBUG
 	fprintf(goBits, "@@@@ @@@@ encoded_data <<<< \n");
