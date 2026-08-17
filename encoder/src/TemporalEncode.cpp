@@ -42,6 +42,7 @@
 
 #include "Misc.hpp"
 #include "TemporalDecode.hpp"
+#include "ThreadPool.hpp"
 
 #include <algorithm>
 
@@ -119,8 +120,8 @@ Surface TemporalCost_4x4::process(const Surface &sour_plane, const Surface &reco
 	int16_t *dst = dest.data();
 	const unsigned bs = transform_block_size;
 
-	for (unsigned block_y = 0; block_y < dst_height; ++block_y) {
-		for (unsigned block_x = 0; block_x < dst_width; ++block_x, ++dst) {
+	ThreadPool::instance().parallel_for(dst_height, [&](unsigned block_y) {
+		for (unsigned block_x = 0; block_x < dst_width; ++block_x) {
 			// SAD term
 			int32_t t0 = 0;
 			const int16_t *sr = srcp + (ptrdiff_t)(block_y * bs) * src_stride + block_x * bs;
@@ -149,9 +150,9 @@ Surface TemporalCost_4x4::process(const Surface &sour_plane, const Surface &reco
 
 			float fCost = (float)(t0 + scale * (t1 + t2));
 			int32_t iCost = (fCost < ((1 << 15) - 1) ? (int)fCost : ((1 << 15) - 1));
-			*dst = (int16_t)(iCost);
+			dst[block_y * dst_width + block_x] = (int16_t)(iCost);
 		}
-	}
+	});
 
 	return dest.finish();
 }
@@ -166,54 +167,76 @@ Surface TemporalCost_SAD::process(const Surface &sour_plane, const Surface &reco
 		CHECK(sour_plane.width() == reco_plane.width() && sour_plane.height() == reco_plane.height());
 		const auto src = sour_plane.view_as<int16_t>();
 		const auto recon = reco_plane.view_as<int16_t>();
-		return Surface::build_from<int16_t>()
-		    .generate(dst_width, dst_height,
-		              [&](unsigned block_x, unsigned block_y) -> int16_t {
-			              // SAD term
-			              int32_t t0 = 0;
-			              for (unsigned int x = (block_x)*transform_block_size; x < (block_x + 1) * transform_block_size; ++x) {
-				              for (unsigned int y = (block_y)*transform_block_size; y < (block_y + 1) * transform_block_size; ++y) {
-					              t0 += abs(src.read(x, y) - recon.read(x, y));
-				              }
-			              }
-			              int32_t iCost = (t0 < ((1 << 15) - 1) ? (int)t0 : ((1 << 15) - 1));
-			              return (int16_t)(iCost);
-		              })
-		    .finish();
+		const int16_t *srcp = src.data();
+		const int16_t *reconp = recon.data();
+		const ptrdiff_t src_stride = src.stride() / sizeof(int16_t);
+		const ptrdiff_t recon_stride = recon.stride() / sizeof(int16_t);
+		const unsigned bs = transform_block_size;
+		auto dest = Surface::build_from<int16_t>();
+		dest.reserve(dst_width, dst_height);
+		int16_t *dst = dest.data();
+		ThreadPool::instance().parallel_for(dst_height, [&](unsigned block_y) {
+			for (unsigned block_x = 0; block_x < dst_width; ++block_x) {
+				int32_t t0 = 0;
+				const int16_t *sr = srcp + (ptrdiff_t)(block_y * bs) * src_stride + block_x * bs;
+				const int16_t *rr = reconp + (ptrdiff_t)(block_y * bs) * recon_stride + block_x * bs;
+				for (unsigned y = 0; y < bs; ++y) {
+					for (unsigned x = 0; x < bs; ++x)
+						t0 += abs((int)sr[x] - (int)rr[x]);
+					sr += src_stride;
+					rr += recon_stride;
+				}
+				int32_t iCost = (t0 < ((1 << 15) - 1) ? (int)t0 : ((1 << 15) - 1));
+				dst[block_y * dst_width + block_x] = (int16_t)(iCost);
+			}
+		});
+		return dest.finish();
 	} else if (sour_plane.bpp() == 1) {
 		// Sum of absolute values (uint8_t)
 		const auto src = sour_plane.view_as<uint8_t>();
-		return Surface::build_from<int16_t>()
-		    .generate(dst_width, dst_height,
-		              [&](unsigned block_x, unsigned block_y) -> int16_t {
-			              // SAD term
-			              int32_t t0 = 0;
-			              for (unsigned int x = (block_x)*transform_block_size; x < (block_x + 1) * transform_block_size; ++x) {
-				              for (unsigned int y = (block_y)*transform_block_size; y < (block_y + 1) * transform_block_size; ++y) {
-					              t0 += abs(src.read(x, y));
-				              }
-			              }
-			              int32_t iCost = (t0 < ((1 << 15) - 1) ? (int)t0 : ((1 << 15) - 1));
-			              return (int16_t)(iCost);
-		              })
-		    .finish();
+		const uint8_t *srcp = src.data();
+		const ptrdiff_t src_stride = src.stride();
+		const unsigned bs = transform_block_size;
+		auto dest = Surface::build_from<int16_t>();
+		dest.reserve(dst_width, dst_height);
+		int16_t *dst = dest.data();
+		ThreadPool::instance().parallel_for(dst_height, [&](unsigned block_y) {
+			for (unsigned block_x = 0; block_x < dst_width; ++block_x) {
+				int32_t t0 = 0;
+				const uint8_t *sr = srcp + (ptrdiff_t)(block_y * bs) * src_stride + block_x * bs;
+				for (unsigned y = 0; y < bs; ++y) {
+					for (unsigned x = 0; x < bs; ++x)
+						t0 += abs((int)sr[x]);
+					sr += src_stride;
+				}
+				int32_t iCost = (t0 < ((1 << 15) - 1) ? (int)t0 : ((1 << 15) - 1));
+				dst[block_y * dst_width + block_x] = (int16_t)(iCost);
+			}
+		});
+		return dest.finish();
 	} else {
 		// Sum of absolute values (uint16_t)
 		const auto src = sour_plane.view_as<uint16_t>();
-		return Surface::build_from<int16_t>()
-		    .generate(dst_width, dst_height,
-		              [&](unsigned block_x, unsigned block_y) -> int16_t {
-			              // SAD term
-			              int32_t t0 = 0;
-			              for (unsigned int x = (block_x)*transform_block_size; x < (block_x + 1) * transform_block_size; ++x) {
-				              for (unsigned int y = (block_y)*transform_block_size; y < (block_y + 1) * transform_block_size; ++y) {
-					              t0 += abs(src.read(x, y));
-				              }
-			              }
-			              int32_t iCost = (t0 < ((1 << 15) - 1) ? (int)t0 : ((1 << 15) - 1));
-			              return (int16_t)(iCost);
-		              })
-		    .finish();
+		const uint16_t *srcp = src.data();
+		const ptrdiff_t src_stride = src.stride() / sizeof(uint16_t);
+		const unsigned bs = transform_block_size;
+		auto dest = Surface::build_from<int16_t>();
+		dest.reserve(dst_width, dst_height);
+		int16_t *dst = dest.data();
+		ThreadPool::instance().parallel_for(dst_height, [&](unsigned block_y) {
+			for (unsigned block_x = 0; block_x < dst_width; ++block_x) {
+				int32_t t0 = 0;
+				const uint16_t *sr = srcp + (ptrdiff_t)(block_y * bs) * src_stride + block_x * bs;
+				for (unsigned y = 0; y < bs; ++y) {
+					for (unsigned x = 0; x < bs; ++x)
+						t0 += abs((int)sr[x]);
+					sr += src_stride;
+				}
+				int32_t iCost = (t0 < ((1 << 15) - 1) ? (int)t0 : ((1 << 15) - 1));
+				dst[block_y * dst_width + block_x] = (int16_t)(iCost);
+			}
+		});
+		return dest.finish();
 	}
 }
 

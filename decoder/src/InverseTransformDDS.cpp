@@ -38,6 +38,7 @@
 
 #include <cstdint>
 #include "InverseTransformDDS.hpp"
+#include "ThreadPool.hpp"
 
 namespace lctm {
 
@@ -80,7 +81,7 @@ Surface InverseTransformDDS::process(int width, int height, const Surface src_la
 	auto dst = Surface::build_from<int16_t>();
 	dst.reserve(width, height);
 #if defined __OPT_MATRIX__
-	for (unsigned y = 0; y < static_cast<unsigned>(height) / 4; y++) {
+	ThreadPool::instance().parallel_for(static_cast<unsigned>(height) / 4, [&](unsigned y) {
 		unsigned dy = y * 4;
 		const int16_t *pc00 = coeffs[0].data(0, y);
 		const int16_t *pc01 = coeffs[1].data(0, y);
@@ -141,7 +142,7 @@ Surface InverseTransformDDS::process(int width, int height, const Surface src_la
 			*pd03++ = c00 - c01 - c02 + c03 + c04 - c05 - c06 + c07 - c08 + c09 + c10 - c11 - c12 + c13 + c14 - c15;
 			*pd03++ = c00 - c01 - c02 + c03 - c04 + c05 + c06 - c07 - c08 + c09 + c10 - c11 + c12 - c13 - c14 + c15;
 		}
-	}
+	});
 #else
 	for (unsigned y = 0; y < static_cast<unsigned>(height) / 4; y++) {
 		for (unsigned x = 0; x < static_cast<unsigned>(width) / 4; x++) {

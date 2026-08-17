@@ -40,6 +40,7 @@
 
 #include "Convert.hpp"
 #include "Misc.hpp"
+#include "ThreadPool.hpp"
 
 #include <algorithm>
 #include <vector>
@@ -162,10 +163,10 @@ Surface Upsampling::process(const Surface &src_plane, Upsample upsample, const u
 	auto v_dest = Surface::build_from<int16_t>();
 	v_dest.reserve(width, height * 2);
 
-	// Vertical scale
-	//
-	for (unsigned x = 0; x < width; ++x)
+	// Vertical scale - each column is independent, process in parallel
+	ThreadPool::instance().parallel_for(width, [&](unsigned x) {
 		apply_kernel(v_dest.data(x, 0), width, v_src.data(x, 0), width, height, kernel);
+	});
 
 	Surface intermediate = v_dest.finish();
 
@@ -174,10 +175,10 @@ Surface Upsampling::process(const Surface &src_plane, Upsample upsample, const u
 	auto h_dst = Surface::build_from<int16_t>();
 	h_dst.reserve(width * 2, height * 2);
 
-	// Horizontal scale
-	//
-	for (unsigned y = 0; y < height * 2; ++y)
+	// Horizontal scale - each row is independent, process in parallel
+	ThreadPool::instance().parallel_for(height * 2, [&](unsigned y) {
 		apply_kernel(h_dst.data(0, y), 1, h_src.data(0, y), 1, width, kernel);
+	});
 
 	return h_dst.finish();
 }
@@ -194,10 +195,10 @@ Surface Upsampling_1D::process(const Surface &src_plane, Upsample upsample, cons
 	auto h_dest = Surface::build_from<int16_t>();
 	h_dest.reserve(2 * width, height);
 
-	// Horizontal scale
-	//
-	for (unsigned y = 0; y < height; ++y)
+	// Horizontal scale - each row is independent, process in parallel
+	ThreadPool::instance().parallel_for(height, [&](unsigned y) {
 		apply_kernel(h_dest.data(0, y), 1, h_src.data(0, y), 1, width, kernel);
+	});
 
 	return h_dest.finish();
 }
