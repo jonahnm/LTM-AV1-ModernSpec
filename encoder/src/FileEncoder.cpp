@@ -1900,11 +1900,11 @@ public:
 		//   t35_uk_country_code_second_octet: 0x00
 		//   itu_t_t35_provider_code: 0x5000 (V-Nova)
 		//   payload: LCEVC NAL unit
-		// The NAL unit itself ends with an RBSP stop-bit (0x80), which the AV1 metadata
-		// OBU reader treats as the OBU's trailing bits. No extra trailing byte is written;
-		// adding one makes the T.35 payload one byte too long and breaks parsing in
-		// conforming decoders (ffmpeg's CBS LCEVC reads it as another process block).
-		const uint32_t obu_payload_size = (uint32_t)(1 + 4 + nal_unit_lcevc.m_data.size());
+		//   trailing bits: 0x80 - the OBU payload must terminate with trailing bits
+		//   (trailing_one_bit followed by zero padding), as expected by the AV1 parsers in
+		//   dav1d and FFmpeg. The embedded LCEVC NAL unit itself also ends with an RBSP
+		//   stop-bit (0x80), so an explicit trailing byte is required.
+		const uint32_t obu_payload_size = (uint32_t)(1 + 4 + nal_unit_lcevc.m_data.size() + 1);
 		write_leb128(obu, obu_payload_size);
 
 		obu.u(8, 0x04); // metadata_type = ITU-T T.35
@@ -1913,6 +1913,8 @@ public:
 		const Packet lcevc_packet = Packet::build().contents(nal_unit_lcevc.m_data).finish();
 		const PacketView v(lcevc_packet);
 		obu.bytes(v);
+
+		obu.u(8, 0x80); // trailing bits
 
 		ESFile::NalUnit nal_unit;
 		nal_unit.m_type = OBU_METADATA;

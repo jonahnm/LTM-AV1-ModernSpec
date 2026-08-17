@@ -454,9 +454,8 @@ static size_t scan_enhancement_av1(uint8_t *data, size_t data_size, uint64_t pts
 
 			if (t35_size > 4 && memcmp(t35, kVNovaItu, sizeof(kVNovaItu)) == 0) {
 				const uint8_t *lcevc = t35 + sizeof(kVNovaItu);
-				// The LCEVC NAL unit occupies the full T.35 payload (its own RBSP stop-bit
-				// acts as the metadata OBU's trailing bits)
-				const uint32_t lcevc_size = t35_size - (uint32_t)sizeof(kVNovaItu);
+				// The LCEVC NAL unit is followed by the OBU's trailing bits byte (0x80)
+				const uint32_t lcevc_size = t35_size - (uint32_t)sizeof(kVNovaItu) - 1;
 
 				// The LCEVC data is a complete NAL unit: marker + header + rbsp
 				if (lcevc_size > 5 && is_nal_marker(lcevc) && (lcevc[3] & 0xc0) == 0x40 && lcevc[4] == 0xff) {
