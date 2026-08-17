@@ -55,6 +55,7 @@
 #include "Compare.hpp"
 #include "Conform.hpp"
 #include "Dithering.hpp"
+#include "EntropyEncoder.hpp"
 #include "LcevcMd5.hpp"
 #include "Misc.hpp"
 #include "PredictedResidual.hpp"
@@ -1035,6 +1036,9 @@ Surface Encoder::decode_residuals(unsigned plane, unsigned loq, const Surface sy
 
 // Decide what syntax blocks should be serialized
 //
+static bool has_encoded_data(const SignaledConfiguration &configuration,
+                             const Surface symbols[MAX_NUM_PLANES][MAX_NUM_LOQS][MAX_NUM_LAYERS]);
+
 static unsigned syntax_blocks_mask(BaseFrameType frame_type, bool encoded_data_present, bool tiled, bool additional_info_present) {
 	SyntaxBlocks data{};
 
@@ -1073,7 +1077,6 @@ unsigned Encoder::base_qp() const { return encoder_configuration_.base_qp; }
 Packet Encoder::encode(std::vector<std::unique_ptr<Image>> &src_image, const Image &intermediate_src_image,
                        const Image &base_prediction_image, BaseFrameType frame_type, bool is_idr, int gop_frame_num,
                        const std::string &output_file) {
-
 	if (dithering_.getInitialised() == false) {
 		INFO("Dither init %4d bitdepth %d", configuration_.picture_configuration.dithering_strength,
 		     configuration_.global_configuration.enhancement_depth);
@@ -1812,14 +1815,60 @@ Packet Encoder::encode(std::vector<std::unique_ptr<Image>> &src_image, const Ima
 
 	//// Serialize enhancenemt data
 	//
-	const bool encoded_data_present = configuration_.picture_configuration.enhancement_enabled ||
-	                                  configuration_.picture_configuration.temporal_signalling_present;
+	// If no residual or temporal surface produced non-empty entropy data this frame
+	// carries no enhancement. Emitting a flag-only EncodedData block breaks both
+	// parser families in the wild: ffmpeg's CBS requires at least one data byte
+	// after the entropy flags, while the V-Nova SDK requires the block to be
+	// consumed exactly (any padding trips its block-size check). Signalling "no
+	// enhancement" and omitting the block is the only layout every decoder accepts.
+	//
+	const bool encoded_data_present = has_encoded_data(configuration_, symbols);
+	if (!encoded_data_present) {
+		configuration_.picture_configuration.enhancement_enabled = false;
+		configuration_.picture_configuration.temporal_signalling_present = false;
+	}
 
 	return Serializer().emit(configuration_,
 	                         syntax_blocks_mask(frame_type, encoded_data_present,
 	                                            configuration_.global_configuration.tile_dimensions_type == TileDimensions_None,
 	                                            configuration_.global_configuration.additional_info_present),
 	                         symbols);
+}
+
+// True if any residual or temporal surface would produce non-empty entropy data,
+// i.e. whether an EncodedData block would carry anything beyond its flags. Mirrors
+// the chunk selection in Serializer::emit_encoded_data.
+//
+static bool has_encoded_data(const SignaledConfiguration &configuration,
+                             const Surface symbols[MAX_NUM_PLANES][MAX_NUM_LOQS][MAX_NUM_LAYERS]) {
+	const unsigned num_layers = configuration.global_configuration.num_residual_layers;
+	const bool tiled = configuration.global_configuration.temporal_enabled ||
+	                   configuration.global_configuration.tile_dimensions_type > 0;
+
+	for (unsigned plane = 0; plane < configuration.global_configuration.num_processed_planes; ++plane) {
+		for (unsigned loq = 0; loq < MAX_NUM_LOQS; ++loq) {
+			const unsigned total = num_layers + ((loq == LOQ_LEVEL_2 && configuration.picture_configuration.temporal_signalling_present) ? 1 : 0);
+			const unsigned first = configuration.picture_configuration.enhancement_enabled ? 0 : num_layers;
+
+			for (unsigned layer = first; layer < total; ++layer) {
+				EncodedChunk e;
+				if (layer != num_layers) {
+					if (tiled)
+						e = EntropyEncoderResidualsTiled().process(symbols[plane][loq][layer],
+						                                           configuration.global_configuration.transform_block_size);
+					else
+						e = EntropyEncoderResiduals().process(symbols[plane][loq][layer]);
+				} else {
+					e = EntropyEncoderTemporal().process(symbols[plane][loq][layer],
+					                                     configuration.global_configuration.transform_block_size,
+					                                     configuration.global_configuration.temporal_tile_intra_signalling_enabled);
+				}
+				if (!e.empty())
+					return true;
+			}
+		}
+	}
+	return false;
 }
 
 } // namespace lctm

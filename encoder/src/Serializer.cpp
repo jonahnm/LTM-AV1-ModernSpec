@@ -583,24 +583,28 @@ void Serializer::emit_picture_configuration(const PictureConfiguration &picture_
 		b.u(7, 0, "reserved");
 	}
 
-	if (picture_configuration.step_width_loq[LOQ_LEVEL_1] != MAX_STEP_WIDTH) {
-		b.u(15, picture_configuration.step_width_loq[LOQ_LEVEL_1], "step_width_level1");
-		b.u(1, picture_configuration.level_1_filtering_enabled, "level_1_filtering_enabled");
+	if (picture_configuration.enhancement_enabled) {
+		if (picture_configuration.step_width_loq[LOQ_LEVEL_1] != MAX_STEP_WIDTH) {
+			b.u(15, picture_configuration.step_width_loq[LOQ_LEVEL_1], "step_width_level1");
+			b.u(1, picture_configuration.level_1_filtering_enabled, "level_1_filtering_enabled");
+		}
 	}
 
-	if (picture_configuration.quant_matrix_mode == QuantMatrix_SameAndCustom ||
-	    picture_configuration.quant_matrix_mode == QuantMatrix_Level2CustomLevel1Default ||
-	    picture_configuration.quant_matrix_mode == QuantMatrix_DifferentAndCustom) {
-		for (unsigned layerIndex = 0; layerIndex < num_layers; layerIndex++)
-			b.u(8, picture_configuration.qm_coefficient_2[layerIndex], "qm_coefficient_0");
-	}
-	if (picture_configuration.quant_matrix_mode == QuantMatrix_Level2DefaultLevel1Custom ||
-	    picture_configuration.quant_matrix_mode == QuantMatrix_DifferentAndCustom) {
-		for (unsigned layerIndex = 0; layerIndex < num_layers; layerIndex++)
-			b.u(8, picture_configuration.qm_coefficient_1[layerIndex], "qm_coefficient_1");
+	if (picture_configuration.enhancement_enabled) {
+		if (picture_configuration.quant_matrix_mode == QuantMatrix_SameAndCustom ||
+		    picture_configuration.quant_matrix_mode == QuantMatrix_Level2CustomLevel1Default ||
+		    picture_configuration.quant_matrix_mode == QuantMatrix_DifferentAndCustom) {
+			for (unsigned layerIndex = 0; layerIndex < num_layers; layerIndex++)
+				b.u(8, picture_configuration.qm_coefficient_2[layerIndex], "qm_coefficient_0");
+		}
+		if (picture_configuration.quant_matrix_mode == QuantMatrix_Level2DefaultLevel1Custom ||
+		    picture_configuration.quant_matrix_mode == QuantMatrix_DifferentAndCustom) {
+			for (unsigned layerIndex = 0; layerIndex < num_layers; layerIndex++)
+				b.u(8, picture_configuration.qm_coefficient_1[layerIndex], "qm_coefficient_1");
+		}
 	}
 
-	if (picture_configuration.dequant_offset_signalled) {
+	if (picture_configuration.enhancement_enabled && picture_configuration.dequant_offset_signalled) {
 		switch (picture_configuration.dequant_offset_mode) {
 		case DequantOffset_Default:
 			b.u(1, 0, "dequant_offset_mode");
@@ -614,7 +618,7 @@ void Serializer::emit_picture_configuration(const PictureConfiguration &picture_
 		b.u(7, picture_configuration.dequant_offset, "dequant_offset");
 	}
 
-	if (picture_configuration.dithering_control) {
+	if (picture_configuration.enhancement_enabled && picture_configuration.dithering_control) {
 		switch (picture_configuration.dithering_type) {
 		case Dithering_None:
 			b.u(2, 0, "dithering_type");
@@ -741,7 +745,6 @@ void Serializer::emit_encoded_data(const SignaledConfiguration &signaled_configu
 		b.u(1, 0, "alignment");
 
 	// Emit surfaces
-	bool emitted_surface_data = false;
 	for (unsigned plane = 0; plane < signaled_configuration.global_configuration.num_processed_planes; ++plane) {
 		for (unsigned loq = 0; loq < MAX_NUM_LOQS; ++loq) {
 
@@ -752,19 +755,10 @@ void Serializer::emit_encoded_data(const SignaledConfiguration &signaled_configu
 				if (entropy_enabled[plane][loq][layer]) {
 					write_multibyte(b, data[plane][loq][layer].size(), "data_size");
 					b.bytes(data[plane][loq][layer]);
-					emitted_surface_data = true;
 				}
 			}
 		}
 	}
-
-	// If no surface data was written (all residuals quantised to zero) the block
-	// consists of the entropy flags alone. Decoders that validate the block framing
-	// (ffmpeg's CBS LCEVC) require at least one byte of data after the flags, so
-	// emit a single padding byte. It is ignored by bitstream parsers that only
-	// locate the surfaces via the flags, and skipped as data by the strict ones.
-	if (!emitted_surface_data)
-		b.u(8, 0x01, "empty_encoded_data_padding");
 
 #if BITSTREAM_DEBUG
 	fprintf(goBits, "@@@@ @@@@ encoded_data <<<< \n");

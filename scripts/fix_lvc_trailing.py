@@ -11,9 +11,11 @@ Two defects are repaired:
 
 2. Flag-only EncodedData blocks: when every residual surface quantises to zero
    the block contains only the per-layer entropy flags with no data after them.
-   ffmpeg's CBS encoded_data reader requires at least one data byte after the
-   flags and rejects the block. A single padding byte (0x01) is inserted at the
-   end of the block so the data area is non-empty.
+   No parser family accepts such a block: ffmpeg's CBS requires at least one
+   data byte after the flags, and the V-Nova SDK's config parser requires the
+   block to be consumed exactly. The block is removed and the Picture config is
+   rewritten to the "no enhancement" form, matching the encoder's output for
+   empty frames.
 
 Both repairs rebuild the metadata OBU's payload from the validated, RBSP-unescaped
 process-block stream, then re-escape it and rewrite the OBU size field. Already
@@ -230,14 +232,34 @@ def write_mb(value):
     return bytes(out)
 
 
-def reemit_blocks(blocks, insert_at):
-    """Re-serialise the unescaped process-block stream, appending a 0x01 padding
-    byte to any block whose content offset+length is in insert_at (flag-only
-    EncodedData blocks). Block size fields are recomputed accordingly."""
+def rewrite_picture_config(content):
+    """Rewrite an enhancement-enabled Picture config block (24-bit header + misc)
+    into the no-enhancement form (single byte: no_enhancement=1, reserved, picture
+    type, temporal refresh, temporal signalling cleared). Called when the frame's
+    EncodedData block is removed, matching the encoder's output for empty frames."""
+    if len(content) < 3:
+        return None
+    no_enhancement = bit_of(content, 0)
+    picture_type = bit_of(content, 5)
+    temporal_refresh = bit_of(content, 6)
+    if no_enhancement:
+        return None  # already no-enhancement
+    return bytes([(1 << 7) | (picture_type << 2) | (temporal_refresh << 1)])
+
+
+def reemit_blocks(blocks, remove_at):
+    """Re-serialise the unescaped process-block stream, dropping any block whose
+    content offset+length is in remove_at (flag-only EncodedData blocks, which no
+    parser family accepts) and rewriting the Picture config to the no-enhancement
+    form. Block size fields are recomputed accordingly."""
     out = bytearray()
     for content_off, ptype, content in parse_blocks(blocks):
-        if content_off + len(content) in insert_at:
-            content = content + b"\x01"
+        if content_off + len(content) in remove_at:
+            continue
+        if ptype == 2:
+            new_pic = rewrite_picture_config(content)
+            if new_pic is not None:
+                content = new_pic
         size = len(content)
         size_type = size if size <= 5 else 7
         out.append((size_type << 5) | ptype)
@@ -250,15 +272,18 @@ def reemit_blocks(blocks, insert_at):
 def analyze_obu(payload, state):
     """Analyse one V-Nova T.35 metadata OBU payload.
 
-    Returns (add_trailing, insertions, blocks, new_state):
-      add_trailing - True if the OBU is missing the final 0x80 byte. The AV1
+    Returns (has_trailing, removes, blocks, new_state):
+      has_trailing - True if the OBU already carries the final 0x80 byte. The AV1
                      metadata OBU must terminate with trailing bits: libdav1d
                      strips the last payload byte (the trailing one-bit byte)
                      before handing the T.35 message to ffmpeg, so without it
                      the embedded LCEVC NAL loses its RBSP stop bit and fails
                      with "rbsp_stop_one_bit: bitstream ended".
-      insertions   - set of unescaped block-stream offsets where a 0x01 padding
-                     byte must be appended (flag-only EncodedData blocks)
+      removes      - set of unescaped block-stream offsets of flag-only
+                     EncodedData blocks (flags with no data), which ffmpeg's
+                     CBS rejects ("no data after flags") and the V-Nova SDK
+                     rejects via its exact block-size check. They are removed
+                     and the Picture config rewritten to "no enhancement".
       blocks       - unescaped block stream (for rebuilding), or None if untouched
       new_state    - updated global-config flag shape ((nplanes, nlayers, te) or None)
     """
@@ -275,13 +300,13 @@ def analyze_obu(payload, state):
     # 1) Find the block region. Two layouts exist in the wild:
     #    - spec-conformant: [blocks][NAL RBSP stop 0x80][OBU trailing 0x80]
     #    - broken (cf1dd08/a0e8d98-era encoder): [blocks][NAL RBSP stop 0x80]
-    add_trailing = False
+    has_trailing = False
     blocks_raw = None
     if n >= 11 and payload[-1] == 0x80 and payload[-2] == 0x80 and block_walk_ok(payload[10:-2]):
         blocks_raw = payload[10:-2]
+        has_trailing = True
     elif payload[-1] == 0x80 and block_walk_ok(payload[10:-1]):
         blocks_raw = payload[10:-1]
-        add_trailing = True
     if blocks_raw is None:
         return False, set(), None, state
 
@@ -289,7 +314,7 @@ def analyze_obu(payload, state):
     blocks = rbsp_unescape(blocks_raw)
     shape = state
     pic_shape = None
-    inserts = set()  # content offsets of flag-only EncodedData blocks
+    removes = set()  # content offsets of flag-only EncodedData blocks
     for content_off, ptype, content in parse_blocks(blocks):
         if ptype == 1:
             s = global_flag_shape(content)
@@ -301,10 +326,12 @@ def analyze_obu(payload, state):
                 pic_shape = s
         elif ptype in (3, 4) and shape and pic_shape:
             fb = flag_bytes(shape[0], shape[1], pic_shape[0], pic_shape[1])
-            if len(content) == fb:
-                inserts.add(content_off + len(content))
+            # Flag-only blocks appear either as exactly the flag section or (from
+            # the a0e8d98-era encoder) with a single 0x01 padding byte appended.
+            if len(content) == fb or (len(content) == fb + 1 and content[-1] == 0x01):
+                removes.add(content_off + len(content))
 
-    return add_trailing, inserts, blocks, shape
+    return has_trailing, removes, blocks, shape
 
 
 def needs_fix(data, obu, state):
@@ -344,7 +371,7 @@ def process(path, do_write, backup):
         print(f"{path}: could not parse OBU stream (not a raw AV1 .lvc?)", file=sys.stderr)
         return 1
 
-    # Per-OBU edits: (add_trailing, insertions, blocks)
+    # Per-OBU edits: (has_trailing, removes, blocks)
     edits = {}
     state = None
     n_meta = 0
@@ -353,12 +380,12 @@ def process(path, do_write, backup):
             continue
         n_meta += 1
         pl = data[obu.payload_offs : obu.payload_offs + obu.payload_size]
-        add_trailing, insertions, blocks, state = analyze_obu(pl, state)
-        if add_trailing or insertions:
-            edits[id(obu)] = (add_trailing, insertions, blocks)
-            obu.fixed = len(insertions) + (1 if add_trailing else 0)
+        has_trailing, removes, blocks, state = analyze_obu(pl, state)
+        if not has_trailing or removes:
+            edits[id(obu)] = (has_trailing, removes, blocks)
+            obu.fixed = len(removes) + (0 if has_trailing else 1)
 
-    total = sum(len(ins) + (1 if add else 0) for add, ins, _ in edits.values())
+    total = sum(len(rm) + (0 if has else 1) for has, rm, _ in edits.values())
     action = "check" if not do_write else "fix"
     print(f"{path}: {action}: {len(edits)}/{n_meta} metadata OBUs, {total} byte(s) of repairs")
     if not do_write:
@@ -368,19 +395,20 @@ def process(path, do_write, backup):
         return 0
 
     # Rebuild the file: verbatim except for edited metadata OBUs, whose payload is
-    # rebuilt from the unescaped block stream (padded as needed), re-escaped, with
-    # the NAL RBSP stop bit and the OBU trailing byte (if missing) re-appended.
+    # rebuilt from the unescaped block stream (flag-only blocks dropped, Picture
+    # config rewritten), re-escaped, with the NAL RBSP stop bit and the OBU
+    # trailing byte (if missing) re-appended.
     out = bytearray()
     for obu in obus:
         if id(obu) not in edits:
             out += data[obu.start : obu.end]
             continue
-        add_trailing, insertions, blocks = edits[id(obu)]
-        blocks = reemit_blocks(blocks, insertions)
+        has_trailing, removes, blocks = edits[id(obu)]
+        blocks = reemit_blocks(blocks, removes)
         escaped = rbsp_escape(blocks)
         new_payload = bytearray(data[obu.payload_offs : obu.payload_offs + 10])
         new_payload += escaped + b"\x80"
-        if add_trailing:
+        if has_trailing:
             new_payload += b"\x80"
         out.append(obu.header_byte)
         if obu.header_byte & (1 << 2):
